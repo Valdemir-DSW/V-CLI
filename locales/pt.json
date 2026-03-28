@@ -98,5 +98,22 @@
   "mgr.board.json_add": "Adicionar JSON",
   "mgr.board.json_remove": "Remover JSON",
   "mgr.board.json_prompt": "URL do ?ndice de placas:",
-  "mgr.board.json_remove_q": "Remover URL?"
+  "mgr.board.json_remove_q": "Remover URL?",
+  "mgr.downgrade": "Downgrade",
+  "mgr.uninstall": "Desinstalar",
+  "mgr.uninstall_confirm": "Remover item?",
+  "mgr.search_btn": "Buscar",
+  "mgr.lib.aux_help_title": "Como usar:",
+  "mgr.lib.aux_help_1": "1) Use uma URL direta para um ?ndice (exemplo: .../library_index.json).",
+  "mgr.lib.aux_help_2": "2) Se ficar vazio, ser? usado apenas o ?ndice padr?o do Arduino.",
+  "mgr.lib.aux_help_3": "3) Salve e clique em Recarregar na aba Gerenciador.",
+  "tray.show": "Mostrar janela",
+  "tray.hide": "Ocultar janela",
+  "tray.select_project": "Selecionar projeto",
+  "tray.hide_on_close": "Ocultar ao fechar",
+  "tray.quit": "Sair",
+  "tray.project_loaded": "Projeto carregado",
+  "tray.start_in_tray": "Iniciar em modo bandeja",
+  "tray.no_recent": "Sem projetos recentes",
+  "tray.project_missing": "Projeto n?o encontrado"
 }

@@ -97,5 +97,22 @@
   "mgr.board.json_add": "Add JSON",
   "mgr.board.json_remove": "Remove JSON",
   "mgr.board.json_prompt": "Board index URL:",
-  "mgr.board.json_remove_q": "Remove URL?"
+  "mgr.board.json_remove_q": "Remove URL?",
+  "mgr.downgrade": "Downgrade",
+  "mgr.uninstall": "Uninstall",
+  "mgr.uninstall_confirm": "Remove item?",
+  "mgr.search_btn": "Search",
+  "mgr.lib.aux_help_title": "How to use:",
+  "mgr.lib.aux_help_1": "1) Use a direct URL to an index file (example: .../library_index.json).",
+  "mgr.lib.aux_help_2": "2) If empty, only the default Arduino index is used.",
+  "mgr.lib.aux_help_3": "3) Save and then click Reload in the manager tab.",
+  "tray.show": "Show window",
+  "tray.hide": "Hide window",
+  "tray.select_project": "Select project",
+  "tray.hide_on_close": "Hide on close",
+  "tray.quit": "Quit",
+  "tray.project_loaded": "Project loaded",
+  "tray.start_in_tray": "Start in tray mode",
+  "tray.no_recent": "No recent projects",
+  "tray.project_missing": "Project not found"
 }

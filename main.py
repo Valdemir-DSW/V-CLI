@@ -17,6 +17,14 @@ from datetime import datetime
 import re
 from typing import Optional
 import webbrowser
+import queue
+
+try:
+    import pystray
+    from PIL import Image
+except Exception:
+    pystray = None
+    Image = None
 
 
 class VCliApp(tk.Tk):
@@ -48,6 +56,11 @@ class VCliApp(tk.Tk):
         self.app_settings_file = self.appdata_dir / "settings.json"
         self.app_icon_path = Path.cwd() / ".ico"
         self.app_settings = self._load_app_settings()
+        self.hide_to_tray_enabled = bool(self.app_settings.get("hide_to_tray", False))
+        self.start_in_tray_enabled = bool(self.app_settings.get("start_in_tray", False))
+        self.tray_icon = None
+        self._is_quitting = False
+        self.ui_queue = queue.Queue()
         
         # Cache de placas para não recarregar toda hora
         self.boards_cache = None
@@ -57,7 +70,12 @@ class VCliApp(tk.Tk):
         self._load_recent_projects()
         self._create_ui()  # IMPORTANTE: cria console ANTES do backend
         self._apply_window_icon(self)
+        self.protocol("WM_DELETE_WINDOW", self._on_main_window_close)
         self.backend = CLIBackend(os.getcwd(), self.log)  # Agora log() funciona
+        self._setup_system_tray()
+        if self.start_in_tray_enabled:
+            self.after(250, self._tray_hide_window)
+        self.after(80, self._process_ui_queue)
         self.after(120, self._start_initial_loading)
 
     def _load_i18n(self):
@@ -524,6 +542,208 @@ class VCliApp(tk.Tk):
         self.app_settings["aux_library_repo"] = (value or "").strip()
         self._save_app_settings()
 
+    def _compare_versions(self, a: str, b: str) -> int:
+        def normalize(v: str):
+            parts = []
+            for token in str(v or "").replace("-", ".").split("."):
+                num = "".join(ch for ch in token if ch.isdigit())
+                parts.append(int(num) if num else 0)
+            return parts or [0]
+        va = normalize(a)
+        vb = normalize(b)
+        if va > vb:
+            return 1
+        if va < vb:
+            return -1
+        return 0
+
+    def _show_status_popup(self, title: str, message: str, is_error: bool = False):
+        pop = tk.Toplevel(self)
+        self._apply_window_icon(pop)
+        pop.title(title)
+        pop.geometry("360x140")
+        pop.resizable(False, False)
+        pop.attributes("-topmost", True)
+        frame = ttk.Frame(pop, padding=10)
+        frame.pack(fill=tk.BOTH, expand=True)
+        color = "#b00020" if is_error else "#0b6e4f"
+        tk.Label(frame, text=title, font=("Arial", 10, "bold"), fg=color).pack(anchor="w")
+        tk.Label(frame, text=message, justify=tk.LEFT, wraplength=330).pack(anchor="w", pady=(6, 0))
+        self.after(4500, lambda: pop.destroy() if pop.winfo_exists() else None)
+
+    def _call_ui(self, fn, *args, **kwargs):
+        self.ui_queue.put((fn, args, kwargs))
+
+    def _process_ui_queue(self):
+        try:
+            while True:
+                fn, args, kwargs = self.ui_queue.get_nowait()
+                try:
+                    fn(*args, **kwargs)
+                except Exception as exc:
+                    self.log(f"[ERRO UI] {exc}")
+        except queue.Empty:
+            pass
+        self.after(80, self._process_ui_queue)
+
+    def _run_tray_action(self, action_name: str, action_fn):
+        def worker():
+            output, ok, err = action_fn()
+            def done():
+                if ok:
+                    self._show_status_popup(action_name, self.t("mgr.action_ok", "Done."))
+                else:
+                    msg = err or (output or "")[:180] or "Unknown error"
+                    self._show_status_popup(action_name, msg, is_error=True)
+            self.after(0, done)
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _tray_compile(self):
+        if not self.current_project or not self.current_config:
+            self._show_status_popup("Compilar", self.t("warn.select_project", "Select a project"), is_error=True)
+            return
+        self._tray_show_window()
+        self._compile_with_modal()
+
+    def _tray_export(self):
+        if not self.current_project or not self.current_config:
+            self._show_status_popup("Exportar", self.t("warn.select_project", "Select a project"), is_error=True)
+            return
+        self._tray_show_window()
+        self._export_binary()
+
+    def _tray_upload(self):
+        if not self.current_project or not self.current_config:
+            self._show_status_popup("Upload", self.t("warn.select_project", "Select a project"), is_error=True)
+            return
+        port = self.current_config.get("port")
+        if not port or port == "auto":
+            self._show_status_popup("Upload", "Defina uma porta serial antes de usar pela bandeja.", is_error=True)
+            return
+        self._tray_show_window()
+        self._upload()
+
+    def _tray_show_window(self):
+        self.deiconify()
+        self.lift()
+        self.focus_force()
+
+    def _tray_hide_window(self):
+        self.withdraw()
+
+    def _tray_open_recent_project(self, path: str):
+        if not path:
+            return
+        if not Path(path).exists():
+            self._show_status_popup(self.t("tray.project_missing", "Project not found"), path, is_error=True)
+            return
+        self._load_project_path(path)
+        self._show_status_popup(self.t("tray.project_loaded", "Project loaded"), Path(path).name)
+
+    def _tray_recent_projects_menu(self):
+        items = []
+        for path in self.recent_projects[:12]:
+            p = Path(path)
+            label = p.name
+            items.append(
+                pystray.MenuItem(
+                    label,
+                    lambda icon, item, target=path: self._call_ui(self._tray_open_recent_project, target),
+                    enabled=p.exists(),
+                )
+            )
+        if not items:
+            items.append(pystray.MenuItem(self.t("tray.no_recent", "No recent projects"), lambda icon, item: None, enabled=False))
+        return items
+
+    def _tray_recent_projects_flat_items(self):
+        items = [
+            pystray.MenuItem(self.t("tray.select_project", "Select project"), lambda icon, item: None, enabled=False)
+        ]
+        items.extend(self._tray_recent_projects_menu())
+        return items
+
+    def _tray_toggle_hide_option(self):
+        self.hide_to_tray_enabled = not self.hide_to_tray_enabled
+        self.app_settings["hide_to_tray"] = self.hide_to_tray_enabled
+        self._save_app_settings()
+
+    def _tray_toggle_start_in_tray(self):
+        self.start_in_tray_enabled = not self.start_in_tray_enabled
+        self.app_settings["start_in_tray"] = self.start_in_tray_enabled
+        self._save_app_settings()
+
+    def _tray_quit(self):
+        self._is_quitting = True
+        if self.tray_icon:
+            try:
+                self.tray_icon.stop()
+            except Exception:
+                pass
+            self.tray_icon = None
+        self.destroy()
+
+    def _refresh_tray_menu(self):
+        if not self.tray_icon:
+            return
+        try:
+            items = [
+                pystray.MenuItem(self.t("tray.show", "Show window"), lambda icon, item: self._call_ui(self._tray_show_window)),
+                pystray.MenuItem(self.t("tray.hide", "Hide window"), lambda icon, item: self._call_ui(self._tray_hide_window)),
+                pystray.Menu.SEPARATOR,
+            ]
+            items.extend(self._tray_recent_projects_flat_items())
+            items.extend([
+                pystray.Menu.SEPARATOR,
+                pystray.MenuItem(
+                    self.t("tray.hide_on_close", "Hide on close"),
+                    lambda icon, item: self._call_ui(self._tray_toggle_hide_option),
+                    checked=lambda item: self.hide_to_tray_enabled,
+                ),
+                pystray.MenuItem(
+                    self.t("tray.start_in_tray", "Start in tray"),
+                    lambda icon, item: self._call_ui(self._tray_toggle_start_in_tray),
+                    checked=lambda item: self.start_in_tray_enabled,
+                ),
+                pystray.Menu.SEPARATOR,
+                pystray.MenuItem(self.t("btn.compile", "Compile"), lambda icon, item: self._call_ui(self._tray_compile)),
+                pystray.MenuItem(self.t("btn.export_binary", "Export binary"), lambda icon, item: self._call_ui(self._tray_export)),
+                pystray.MenuItem(self.t("btn.upload", "Upload"), lambda icon, item: self._call_ui(self._tray_upload)),
+                pystray.Menu.SEPARATOR,
+                pystray.MenuItem(self.t("tray.quit", "Quit"), lambda icon, item: self._call_ui(self._tray_quit)),
+            ])
+            self.tray_icon.menu = pystray.Menu(*items)
+            self.tray_icon.update_menu()
+        except Exception as exc:
+            self.log(f"[AVISO] Não foi possível atualizar menu da bandeja: {exc}")
+
+    def _setup_system_tray(self):
+        if pystray is None or Image is None:
+            self.log("[AVISO] pystray não disponível; bandeja do Windows desativada.")
+            return
+        try:
+            icon_image = Image.open(str(self.app_icon_path))
+        except Exception:
+            self.log("[AVISO] Ícone da bandeja não encontrado.")
+            return
+
+        try:
+            self.tray_icon = pystray.Icon("vcli", icon_image, "V CLI")
+            self._refresh_tray_menu()
+            # On Windows, detached mode is more reliable for right-click context menu.
+            self.tray_icon.run_detached()
+        except Exception as exc:
+            self.log(f"[ERRO] Falha ao iniciar bandeja: {exc}")
+
+    def _on_main_window_close(self):
+        if self._is_quitting:
+            self.destroy()
+            return
+        if self.hide_to_tray_enabled:
+            self._tray_hide_window()
+            return
+        self._tray_quit()
+
     def _load_recent_projects(self):
         try:
             if self.recent_projects_file.exists():
@@ -554,6 +774,7 @@ class VCliApp(tk.Tk):
         self.recent_projects = self.recent_projects[:20]
         self._save_recent_projects()
         self._populate_recent_projects()
+        self._refresh_tray_menu()
     
     def _open_recent(self, event):
         selection =self.recent_listbox.curselection()
@@ -578,6 +799,7 @@ class VCliApp(tk.Tk):
             self.recent_projects.pop(selection[0])
             self._save_recent_projects()
             self._populate_recent_projects()
+            self._refresh_tray_menu()
     
     # PROJETOS
     def _create_project(self):
@@ -1408,50 +1630,91 @@ class VCliApp(tk.Tk):
                 row.pack(fill=tk.X, pady=(6, 0))
                 ttk.Label(row, text=self.t("mgr.version", "Version:")).pack(side=tk.LEFT)
                 version_var = tk.StringVar(value=default_version or versions[0])
-                ttk.Combobox(row, state="readonly", width=24, textvariable=version_var, values=versions).pack(side=tk.LEFT, padx=6)
+                combo = ttk.Combobox(row, state="readonly", width=24, textvariable=version_var, values=versions)
+                combo.pack(side=tk.LEFT, padx=6)
 
-                if has_install:
-                    action_text = self.t("mgr.install", "Install")
-                elif has_update:
-                    action_text = self.t("mgr.update", "Update")
-                else:
-                    action_text = self.t("mgr.installed_state", "Installed")
+                def current_mode(_version_var=version_var, _installed_v=installed_v):
+                    selected = (_version_var.get() or "").strip()
+                    if not _installed_v:
+                        return "install", self.t("mgr.install", "Install")
+                    cmp = self._compare_versions(selected, _installed_v)
+                    if cmp > 0:
+                        return "update", self.t("mgr.update", "Update")
+                    if cmp < 0:
+                        return "downgrade", self.t("mgr.downgrade", "Downgrade")
+                    return "installed", self.t("mgr.installed_state", "Installed")
 
-                def make_action(cid=core_id, nm=name, install=has_install, update=has_update, vv=version_var):
-                    def run_action():
-                        if runtime["busy"]:
-                            return
-                        version = (vv.get() or "").strip()
-                        set_busy(True)
-                        append_log(f"{action_text}: {nm} {version}")
-
-                        def worker():
-                            if install:
-                                out, ok, err = self.backend.install_core_sync(cid, version)
-                            elif update:
-                                out, ok, err = self.backend.install_core_sync(cid, version) if version else self.backend.upgrade_core_sync(cid)
-                            else:
-                                out, ok, err = ("", True, "")
-
-                            def done():
-                                set_busy(False)
-                                if ok:
-                                    append_log(self.t("mgr.action_ok", "Done."))
-                                    refresh_data()
-                                    self._load_boards()
-                                else:
-                                    append_log(f"{self.t('error.title', 'Error')}: {err}")
-                                    self._show_error_modal(self.t("mgr.board.title", "Board Manager"), err, out)
-
-                            self.after(0, done)
-
-                        threading.Thread(target=worker, daemon=True).start()
-                    return run_action
-
-                btn = ttk.Button(row, text=action_text, command=make_action())
+                btn = ttk.Button(row, text="")
                 btn.pack(side=tk.LEFT, padx=6)
-                if not (has_install or has_update):
-                    btn.state(["disabled"])
+                uninstall_btn = ttk.Button(row, text=self.t("mgr.uninstall", "Uninstall"))
+                uninstall_btn.pack(side=tk.LEFT, padx=4)
+                if not installed_v:
+                    uninstall_btn.state(["disabled"])
+
+                def refresh_action_button(*_, _btn=btn, _current_mode=current_mode):
+                    mode, label = _current_mode()
+                    _btn.config(text=label)
+                    if mode == "installed":
+                        _btn.state(["disabled"])
+                    else:
+                        _btn.state(["!disabled"])
+
+                def run_action(_core_id=core_id, _name=name, _version_var=version_var, _current_mode=current_mode):
+                    if runtime["busy"]:
+                        return
+                    mode, label = _current_mode()
+                    if mode == "installed":
+                        return
+                    version = (_version_var.get() or "").strip()
+                    set_busy(True)
+                    append_log(f"{label}: {_name} {version}")
+
+                    def worker():
+                        out, ok, err = self.backend.install_core_sync(_core_id, version)
+
+                        def done():
+                            set_busy(False)
+                            if ok:
+                                append_log(self.t("mgr.action_ok", "Done."))
+                                refresh_data()
+                                self._load_boards()
+                            else:
+                                append_log(f"{self.t('error.title', 'Error')}: {err}")
+                                self._show_error_modal(self.t("mgr.board.title", "Board Manager"), err, out)
+
+                        self.after(0, done)
+
+                    threading.Thread(target=worker, daemon=True).start()
+
+                def run_uninstall(_core_id=core_id, _name=name, _installed_v=installed_v):
+                    if runtime["busy"] or not _installed_v:
+                        return
+                    if not messagebox.askyesno(self.t("mgr.uninstall", "Uninstall"), f"{self.t('mgr.uninstall_confirm', 'Remove item?')}\n{_name}"):
+                        return
+                    set_busy(True)
+                    append_log(f"{self.t('mgr.uninstall', 'Uninstall')}: {_name}")
+
+                    def worker():
+                        out, ok, err = self.backend.uninstall_core_sync(_core_id)
+
+                        def done():
+                            set_busy(False)
+                            if ok:
+                                append_log(self.t("mgr.action_ok", "Done."))
+                                refresh_data()
+                                self._load_boards()
+                            else:
+                                append_log(f"{self.t('error.title', 'Error')}: {err}")
+                                self._show_error_modal(self.t("mgr.board.title", "Board Manager"), err, out)
+
+                        self.after(0, done)
+
+                    threading.Thread(target=worker, daemon=True).start()
+
+                btn.config(command=run_action)
+                uninstall_btn.config(command=run_uninstall)
+                combo.bind("<<ComboboxSelected>>", refresh_action_button)
+                refresh_action_button()
 
         def refresh_data():
             if runtime["busy"]:
@@ -1461,11 +1724,13 @@ class VCliApp(tk.Tk):
 
             def worker():
                 all_cores = [self._normalize_core_entry(x) for x in self.backend.search_cores("")]
-                installed = [self._normalize_core_entry(x) for x in self.backend.list_installed_cores()]
-                updates = [self._normalize_core_entry(x) for x in self.backend.list_core_updates()]
-                for core in all_cores:
-                    if core.get("id") and not core.get("versions"):
-                        core["versions"] = self.backend.get_core_versions(core["id"])
+                installed = [x for x in all_cores if x.get("installed_version")]
+                updates = [
+                    x
+                    for x in installed
+                    if x.get("latest_version")
+                    and self._compare_versions(x.get("latest_version", ""), x.get("installed_version", "")) > 0
+                ]
                 urls = self.backend.get_additional_board_urls()
 
                 def done():
@@ -1588,6 +1853,13 @@ class VCliApp(tk.Tk):
         aux_var = tk.StringVar(value=self._get_aux_library_repo())
         ttk.Entry(aux_main, textvariable=aux_var).pack(fill=tk.X, pady=(6, 6))
         ttk.Button(aux_main, text=self.t("mgr.save", "Save"), command=lambda: self._set_aux_library_repo(aux_var.get())).pack(anchor="w")
+        tutorial = (
+            self.t("mgr.lib.aux_help_title", "How to use:") + "\n"
+            + self.t("mgr.lib.aux_help_1", "1) Use a direct URL to an index file (for example: .../library_index.json).") + "\n"
+            + self.t("mgr.lib.aux_help_2", "2) If empty, only the default Arduino index is used.") + "\n"
+            + self.t("mgr.lib.aux_help_3", "3) Save and then click Reload in the manager tab.")
+        )
+        ttk.Label(aux_main, text=tutorial, justify=tk.LEFT, wraplength=860).pack(anchor="w", pady=(10, 0))
 
         footer = ttk.Frame(dialog, padding=(8, 2, 8, 8))
         footer.pack(fill=tk.X)
@@ -1674,50 +1946,92 @@ class VCliApp(tk.Tk):
                 row.pack(fill=tk.X, pady=(6, 0))
                 ttk.Label(row, text=self.t("mgr.version", "Version:")).pack(side=tk.LEFT)
                 version_var = tk.StringVar(value=default_version or versions[0])
-                ttk.Combobox(row, state="readonly", width=24, textvariable=version_var, values=versions).pack(side=tk.LEFT, padx=6)
+                combo = ttk.Combobox(row, state="readonly", width=24, textvariable=version_var, values=versions)
+                combo.pack(side=tk.LEFT, padx=6)
 
-                if has_install:
-                    action_text = self.t("mgr.install", "Install")
-                elif has_update:
-                    action_text = self.t("mgr.update", "Update")
-                else:
-                    action_text = self.t("mgr.installed_state", "Installed")
+                def current_mode(_version_var=version_var, _installed_v=installed_v):
+                    selected = (_version_var.get() or "").strip()
+                    if not _installed_v:
+                        return "install", self.t("mgr.install", "Install")
+                    cmp = self._compare_versions(selected, _installed_v)
+                    if cmp > 0:
+                        return "update", self.t("mgr.update", "Update")
+                    if cmp < 0:
+                        return "downgrade", self.t("mgr.downgrade", "Downgrade")
+                    return "installed", self.t("mgr.installed_state", "Installed")
 
-                def make_action(nm=name, install=has_install, update=has_update, vv=version_var):
-                    def run_action():
-                        if runtime["busy"]:
-                            return
-                        version = (vv.get() or "").strip()
-                        set_busy(True)
-                        append_log(f"{action_text}: {nm} {version}")
-
-                        def worker():
-                            if install:
-                                out, ok, err = self.backend.install_library_sync(nm, version)
-                            elif update:
-                                out, ok, err = self.backend.install_library_sync(nm, version) if version else self.backend.upgrade_library_sync(nm)
-                            else:
-                                out, ok, err = ("", True, "")
-
-                            def done():
-                                set_busy(False)
-                                if ok:
-                                    append_log(self.t("mgr.action_ok", "Done."))
-                                    refresh_data()
-                                    self._load_libs()
-                                else:
-                                    append_log(f"{self.t('error.title', 'Error')}: {err}")
-                                    self._show_error_modal(self.t("mgr.lib.title", "Library Manager"), err, out)
-
-                            self.after(0, done)
-
-                        threading.Thread(target=worker, daemon=True).start()
-                    return run_action
-
-                btn = ttk.Button(row, text=action_text, command=make_action())
+                btn = ttk.Button(row, text="")
                 btn.pack(side=tk.LEFT, padx=6)
-                if not (has_install or has_update):
-                    btn.state(["disabled"])
+
+                uninstall_btn = ttk.Button(row, text=self.t("mgr.uninstall", "Uninstall"))
+                uninstall_btn.pack(side=tk.LEFT, padx=4)
+                if not installed_v:
+                    uninstall_btn.state(["disabled"])
+
+                def refresh_action_button(*_, _btn=btn, _current_mode=current_mode):
+                    mode, label = _current_mode()
+                    _btn.config(text=label)
+                    if mode == "installed":
+                        _btn.state(["disabled"])
+                    else:
+                        _btn.state(["!disabled"])
+
+                def run_action(_name=name, _version_var=version_var, _current_mode=current_mode):
+                    if runtime["busy"]:
+                        return
+                    mode, label = _current_mode()
+                    if mode == "installed":
+                        return
+                    version = (_version_var.get() or "").strip()
+                    set_busy(True)
+                    append_log(f"{label}: {_name} {version}")
+
+                    def worker():
+                        out, ok, err = self.backend.install_library_sync(_name, version)
+
+                        def done():
+                            set_busy(False)
+                            if ok:
+                                append_log(self.t("mgr.action_ok", "Done."))
+                                refresh_data()
+                                self._load_libs()
+                            else:
+                                append_log(f"{self.t('error.title', 'Error')}: {err}")
+                                self._show_error_modal(self.t("mgr.lib.title", "Library Manager"), err, out)
+
+                        self.after(0, done)
+
+                    threading.Thread(target=worker, daemon=True).start()
+
+                def run_uninstall(_name=name, _installed_v=installed_v):
+                    if runtime["busy"] or not _installed_v:
+                        return
+                    if not messagebox.askyesno(self.t("mgr.uninstall", "Uninstall"), f"{self.t('mgr.uninstall_confirm', 'Remove library?')}\n{_name}"):
+                        return
+                    set_busy(True)
+                    append_log(f"{self.t('mgr.uninstall', 'Uninstall')}: {_name}")
+
+                    def worker():
+                        out, ok, err = self.backend.uninstall_library(_name)
+
+                        def done():
+                            set_busy(False)
+                            if ok:
+                                append_log(self.t("mgr.action_ok", "Done."))
+                                refresh_data()
+                                self._load_libs()
+                            else:
+                                append_log(f"{self.t('error.title', 'Error')}: {err}")
+                                self._show_error_modal(self.t("mgr.lib.title", "Library Manager"), err, out)
+
+                        self.after(0, done)
+
+                    threading.Thread(target=worker, daemon=True).start()
+
+                btn.config(command=run_action)
+                uninstall_btn.config(command=run_uninstall)
+                combo.bind("<<ComboboxSelected>>", refresh_action_button)
+                refresh_action_button()
 
         def refresh_data():
             if runtime["busy"]:
@@ -1726,7 +2040,9 @@ class VCliApp(tk.Tk):
             append_log(self.t("mgr.loading", "Loading data..."))
 
             def worker():
-                all_libs = [self._normalize_library_entry(x) for x in self.backend.search_libraries("")]
+                term = search_var.get().strip()
+                limit = 0 if term else 20
+                all_libs = [self._normalize_library_entry(x) for x in self.backend.search_libraries(term, limit=limit)]
                 installed = [self._normalize_library_entry(x) for x in self.backend.list_libraries_fixed()]
                 updates = [self._normalize_library_entry(x) for x in self.backend.list_library_updates()]
                 installed_map = {x.get("name", "").lower(): x for x in installed if x.get("name")}
@@ -1743,6 +2059,13 @@ class VCliApp(tk.Tk):
                         lib["versions"] = self.backend.get_library_versions(lib["name"])
                     merged.append(lib)
 
+                for collection in (installed, updates):
+                    for lib in collection:
+                        if lib.get("name") and not lib.get("versions"):
+                            lib["versions"] = self.backend.get_library_versions(lib["name"])
+                        if not lib.get("latest_version") and lib.get("versions"):
+                            lib["latest_version"] = lib["versions"][0]
+
                 def done():
                     state["all"] = [x for x in merged if x.get("name")]
                     state["installed"] = [x for x in installed if x.get("name")]
@@ -1756,8 +2079,9 @@ class VCliApp(tk.Tk):
             threading.Thread(target=worker, daemon=True).start()
 
         ttk.Button(top, text=self.t("mgr.reload", "Reload"), command=refresh_data).pack(side=tk.LEFT, padx=4)
+        ttk.Button(top, text=self.t("mgr.search_btn", "Search"), command=refresh_data).pack(side=tk.LEFT, padx=4)
         filter_combo.bind("<<ComboboxSelected>>", lambda e: render_cards())
-        search_var.trace_add("write", lambda *_: render_cards())
+        search_var.trace_add("write", lambda *_: render_cards() if not search_var.get().strip() else None)
         refresh_data()
 
     def _update_boards_combo_cached(self):
