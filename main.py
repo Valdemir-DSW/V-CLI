@@ -458,7 +458,7 @@ class VCliApp(tk.Tk):
         self.boards_tree.bind("<Double-1>", self._select_board)
     
     def _create_libs_tab(self):
-        """Bibliotecas"""
+        """Bibliotecas - Mostra apenas as INSTALADAS"""
         tab = ttk.Frame(self.notebook)
         self.notebook.add(tab, text=self.t("tab.libs", "Libraries"))
         
@@ -466,7 +466,6 @@ class VCliApp(tk.Tk):
         bframe.pack(fill=tk.X, padx=2, pady=2)
         ttk.Button(bframe, text="Atualizar", command=self._load_libs).pack(side=tk.LEFT, padx=1, expand=True, fill=tk.X)
         ttk.Button(bframe, text="ZIP", command=self._install_lib_zip).pack(side=tk.LEFT, padx=1, expand=True, fill=tk.X)
-        ttk.Button(bframe, text="Buscar", command=self._search_lib).pack(side=tk.LEFT, padx=1, expand=True, fill=tk.X)
         ttk.Button(bframe, text="Gerenciador", command=self._open_library_manager).pack(side=tk.LEFT, padx=1, expand=True, fill=tk.X)
         
         cols = ("Versão", "Descrição")
@@ -2492,7 +2491,7 @@ class VCliApp(tk.Tk):
         threading.Thread(target=load_thread, daemon=True).start()
 
     def _finish_loading_libs(self, libs):
-        """Atualiza UI com as bibliotecas carregadas."""
+        """Atualiza UI com as bibliotecas INSTALADAS."""
         self._libs_loading = False
         self.libs_tree.delete(*self.libs_tree.get_children())
         self.loaded_libraries = libs or []
@@ -2503,7 +2502,7 @@ class VCliApp(tk.Tk):
             sentence = lib.get("sentence", "")[:40]
             self.libs_tree.insert("", tk.END, text=name, values=(version, sentence))
         
-        self.log(f"Bibliotecas carregadas: {len(self.loaded_libraries)} encontradas")
+        self.log(f"Bibliotecas instaladas: {len(self.loaded_libraries)} encontradas")
 
     def _on_lib_double_click(self, event):
         sel = self.libs_tree.selection()
@@ -2838,7 +2837,7 @@ class VCliApp(tk.Tk):
         self.log("Bibliotecas carregadas")
 
     def _start_initial_loading(self):
-        self.log("[STARTUP] Iniciando carregamento inicial...")
+        self.log("[STARTUP] Carregando dados instalados...")
         startup_modal = self._show_startup_modal()
 
         def load_thread():
@@ -2847,16 +2846,13 @@ class VCliApp(tk.Tk):
             libs = []
             ports = []
             try:
-                self.log("[STARTUP] Carregando placas...")
+                self.log("[STARTUP] Carregando placas instaladas...")
                 boards = self.backend.list_boards()
-                self.log(f"[STARTUP] Placas carregadas: {len(boards) if boards else 0}")
+                self.log(f"[STARTUP] Placas instaladas: {len(boards) if boards else 0}")
                 
-                self.log("[STARTUP] Carregando bibliotecas...")
+                self.log("[STARTUP] Carregando bibliotecas instaladas...")
                 libs = self.backend.list_libraries_fixed()
-                if not libs:
-                    self.log("[STARTUP] Tentando método alternativo para libs...")
-                    libs = self.backend.list_libraries()
-                self.log(f"[STARTUP] Bibliotecas carregadas: {len(libs) if libs else 0}")
+                self.log(f"[STARTUP] Bibliotecas instaladas: {len(libs) if libs else 0}")
                 
                 self.log("[STARTUP] Obtendo portas seriais...")
                 ports = self._get_serial_ports()

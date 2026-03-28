@@ -281,7 +281,7 @@ class CLIBackend:
         
         cmd = [str(self.cli_path), "--config-file", str(self.config_file)] + [str(arg) for arg in args]
         try:
-            result = self._run_subprocess(cmd, timeout=60)
+            result = self._run_subprocess(cmd, timeout=120)
             
             # Log do comando
             cmd_short = ' '.join(str(a) for a in args[:3])
@@ -626,15 +626,15 @@ void loop() {
     # ==================== PLACAS ====================
     
     def list_boards(self) -> list:
-        """Lista todas as placas disponíveis com suporte a versões antigas."""
-        self.log("[BOARDS] Iniciando list_boards...")
-        # Usa apenas listall sem flags adicionais (arduino-cli não tem --all)
-        output = self.run_cli_sync(["board", "listall", "--format", "json"])
+        """Lista placas instaladas/compatíveis com FQBN válido."""
+        self.log("[BOARDS] Carregando placas...")
+        # board listall retorna placas com fqbn válido
+        output = self.run_cli_sync(["board", "listall", "--json"])
         
         self.log(f"[BOARDS] Output length: {len(output) if output else 0}")
         
         if not output or not output.strip():
-            self.log("[BOARDS] AVISO: Nenhuma placa disponível. Verifique a configuração.")
+            self.log("[BOARDS] AVISO: Nenhuma placa disponível.")
             return []
         
         try:
@@ -648,25 +648,82 @@ void loop() {
                 return []
             
             boards = data.get("boards", [])
-            self.log(f"[BOARDS] Encontradas {len(boards) if boards else 0} placas com key 'boards'")
+            self.log(f"[BOARDS] Encontradas {len(boards)} placas")
             
-            # Se temos uma chave "board" singular também, tenta
-            if not boards and "board" in data:
-                board_item = data.get("board")
-                boards = board_item if isinstance(board_item, list) else [board_item]
-                self.log(f"[BOARDS] Encontradas {len(boards)} placas com key 'board'")
-            
-            # Garante que cada placa tem os campos necessários
+            # Filtra apenas as com FQBN válido
+            valid_boards = []
             for board in boards:
                 if isinstance(board, dict):
-                    board.setdefault("name", board.get("name", board.get("title", "Desconhecida")))
-                    board.setdefault("fqbn", board.get("fqbn", ""))
+                    fqbn_val = board.get("fqbn", "")
+                    if fqbn_val:
+                        valid_boards.append({
+                            "name": board.get("name", "?"),
+                            "fqbn": fqbn_val,
+                        })
             
-            if boards:
-                self.log(f"[BOARDS OK] Carregadas {len(boards)} placas")
+            if valid_boards:
+                self.log(f"[BOARDS OK] Carregadas {len(valid_boards)} placas com FQBN válido")
+            else:
+                self.log("[BOARDS WARN] Nenhuma placa com FQBN encontrada")
+            return valid_boards
+        except json.JSONDecodeError as e:
+            self.log(f"[BOARDS JSON ERROR] {str(e)[:100]}")
+            return []
+        except Exception as e:
+            self.log(f"[BOARDS ERROR] {e}")
+            return []
+    
+    def list_boards_all_versions(self) -> list:
+        """Lista TODAS as placas disponíveis com histórico de versões (para gerenciador)."""
+        self.log("[BOARDS] Buscando todas as placas com histórico...")
+        # core search --all retorna todas as versões disponíveis
+        output = self.run_cli_sync(["core", "search", "--all", "--json"])
+        
+        self.log(f"[BOARDS] Output length: {len(output) if output else 0}")
+        
+        if not output or not output.strip():
+            self.log("[BOARDS] AVISO: Nenhuma placa disponível.")
+            return []
+        
+        try:
+            data = self._parse_cli_json(output)
+            if data is None:
+                self.log("[BOARDS] ERRO: JSON inválido ao parsear")
+                return []
+            
+            if not isinstance(data, dict):
+                self.log(f"[BOARDS] ERRO: JSON não é dict, é {type(data)}")
+                return []
+            
+            platforms = data.get("platforms", [])
+            self.log(f"[BOARDS] Encontradas {len(platforms)} plataformas")
+            
+            # Retorna todas as versões de cada plataforma
+            all_boards = []
+            for platform in platforms:
+                if not isinstance(platform, dict):
+                    continue
+                
+                platform_id = platform.get("id", "")
+                releases = platform.get("releases", {})
+                
+                for version, release_data in releases.items():
+                    if isinstance(release_data, dict):
+                        release_boards = release_data.get("boards", [])
+                        for board in release_boards:
+                            if isinstance(board, dict):
+                                all_boards.append({
+                                    "name": board.get("name", "?"),
+                                    "fqbn": f"{platform_id}:{board.get('fqbn', '')}",
+                                    "platform_version": version,
+                                    "platform_id": platform_id
+                                })
+            
+            if all_boards:
+                self.log(f"[BOARDS OK] {len(all_boards)} entradas de placas com histórico")
             else:
                 self.log("[BOARDS WARN] Nenhuma placa encontrada")
-            return boards
+            return all_boards
         except json.JSONDecodeError as e:
             self.log(f"[BOARDS JSON ERROR] {str(e)[:100]}")
             return []
@@ -1236,10 +1293,10 @@ void loop() {
             return []
     
     def list_libraries_fixed(self) -> list:
-        """Parsing robusto para a aba Bibliotecas."""
-        self.log("[LIBS] Iniciando list_libraries_fixed...")
-        # arduino-cli lib list mostra apenas bibliotecas instaladas, não versões antigas
-        output = self.run_cli_sync(["lib", "list", "--format", "json"])
+        """Retorna apenas bibliotecas INSTALADAS na máquina."""
+        self.log("[LIBS] Carregando bibliotecas instaladas...")
+        # lib list retorna apenas bibliotecas instaladas
+        output = self.run_cli_sync(["lib", "list", "--json"])
         
         self.log(f"[LIBS] Output length: {len(output) if output else 0}")
         
@@ -1252,100 +1309,112 @@ void loop() {
             self.log("[LIBS] ERRO: JSON inválido")
             return []
 
-        raw_libs = []
-        if isinstance(data, dict):
-            if "installed_libraries" in data:
-                raw_libs = data.get("installed_libraries", [])
-                self.log(f"[LIBS] Found {len(raw_libs)} via 'installed_libraries'")
-            elif "libraries" in data:
-                raw_libs = data.get("libraries", [])
-                self.log(f"[LIBS] Found {len(raw_libs)} via 'libraries'")
-            elif "library" in data:
-                raw_item = data.get("library")
-                raw_libs = raw_item if isinstance(raw_item, list) else [raw_item]
-                self.log(f"[LIBS] Found {len(raw_libs)} via 'library'")
-            else:
-                # Tenta extrair como dict direto  
-                raw_libs = [v for v in data.values() if isinstance(v, dict)]
-                self.log(f"[LIBS] Found {len(raw_libs)} via generic dict extraction")
-        elif isinstance(data, list):
-            raw_libs = data
-            self.log(f"[LIBS] Found {len(raw_libs)} as direct list")
+        # lib list retorna estrutura com "installed_libraries"
+        libraries = data.get("installed_libraries", [])
+        self.log(f"[LIBS] Encontradas {len(libraries)} bibliotecas instaladas")
 
-        self.log(f"[LIBS] Processing {len(raw_libs)} raw items...")
-        
         libs = []
-        for item in raw_libs:
-            if not isinstance(item, dict):
+        for lib_entry in libraries:
+            if not isinstance(lib_entry, dict):
                 continue
             
-            # Estrutura pode variar - tenta múltiplas
-            lib_obj = item.get("library") if isinstance(item.get("library"), dict) else item
-            rel_obj = item.get("release") if isinstance(item.get("release"), dict) else {}
-            inst_obj = item.get("installed") if isinstance(item.get("installed"), dict) else {}
+            # A estrutura é: { "library": { "name": "...", "version": "...", ... } }
+            library = lib_entry.get("library", {})
+            if not isinstance(library, dict):
+                continue
             
-            # Extrai nome
-            name = (
-                lib_obj.get("name")
-                or lib_obj.get("title")
-                or item.get("name")
-                or item.get("title")
-                or "Desconhecida"
-            )
-            
-            # Extrai caminho
-            path_value = (
-                item.get("path")
-                or item.get("location")
-                or item.get("install_dir")
-                or lib_obj.get("path")
-                or lib_obj.get("location")
-                or inst_obj.get("path")
-                or ""
-            )
-            
-            # Descrição
-            sentence = (
-                lib_obj.get("sentence")
-                or lib_obj.get("paragraph")
-                or lib_obj.get("description")
-                or item.get("sentence")
-                or item.get("description")
-                or ""
-            )
-            
-            # Extrai versão - tenta ordem de prioridade
-            version = (
-                inst_obj.get("version")
-                or rel_obj.get("version")
-                or lib_obj.get("version")
-                or item.get("version")
-                or item.get("latest")
-                or "N/A"
-            )
+            lib_name = library.get("name", "?")
+            lib_version = library.get("version", "")
+            lib_sentence = library.get("sentence", "")
+            lib_author = library.get("author", "")
+            lib_path = library.get("install_dir", "")
             
             libs.append({
-                "name": name,
-                "version": version,
-                "sentence": sentence,
-                "path": path_value,
+                "name": lib_name,
+                "version": lib_version or "N/A",
+                "sentence": lib_sentence,
+                "author": lib_author,
+                "path": lib_path,
             })
 
-        # Remove duplicatas mantendo ordem (libname@version)
-        unique = {}
-        for lib in libs:
-            key = f"{lib.get('name','').strip().lower()}@{lib.get('version','').strip().lower()}"
-            if key not in unique:
-                unique[key] = lib
+        if libs:
+            self.log(f"[LIBS OK] Carregadas {len(libs)} bibliotecas instaladas")
+        else:
+            self.log("[LIBS WARN] Nenhuma biblioteca instalada encontrada")
         
-        normalized = list(unique.values())
+        return libs
+    
+    def list_libraries_all_versions(self) -> list:
+        """Retorna TODAS as bibliotecas disponíveis com histórico de versões (para gerenciador)."""
+        self.log("[LIBS] Buscando todas as bibliotecas com histórico...")
+        # lib search "*" retorna index completo com versões
+        output = self.run_cli_sync(["lib", "search", "*", "--json"])
+        
+        self.log(f"[LIBS] Output length: {len(output) if output else 0}")
+        
+        if not output or not output.strip():
+            self.log("[LIBS] INFO: Nenhuma biblioteca disponível")
+            return []
 
-        if normalized:
-            self.log(f"[LIBS OK] Carregadas {len(normalized)} bibliotecas")
+        data = self._parse_cli_json(output)
+        if data is None:
+            self.log("[LIBS] ERRO: JSON inválido")
+            return []
+
+        libraries = data.get("libraries", [])
+        self.log(f"[LIBS] Encontradas {len(libraries)} bibliotecas no índice")
+
+        libs = []
+        for lib_entry in libraries:
+            if not isinstance(lib_entry, dict):
+                continue
+            
+            lib_name = lib_entry.get("name", "Desconhecida")
+            lib_sentence = lib_entry.get("sentence", "")
+            lib_author = lib_entry.get("author", "")
+            
+            # Pega todas as versões
+            releases = lib_entry.get("releases", {})
+            available_versions = lib_entry.get("available_versions", [])
+            
+            if releases and isinstance(releases, dict):
+                # Retorna cada versão separadamente
+                for version in releases.keys():
+                    libs.append({
+                        "name": lib_name,
+                        "version": version,
+                        "sentence": lib_sentence,
+                        "author": lib_author,
+                        "path": "",
+                    })
+            elif available_versions and isinstance(available_versions, list):
+                # Alternativa: usar available_versions
+                for version in available_versions:
+                    libs.append({
+                        "name": lib_name,
+                        "version": version,
+                        "sentence": lib_sentence,
+                        "author": lib_author,
+                        "path": "",
+                    })
+            else:
+                # Fallback: pelo menos a versão latest
+                latest = lib_entry.get("latest")
+                if latest and isinstance(latest, dict):
+                    libs.append({
+                        "name": lib_name,
+                        "version": latest.get("version", "N/A"),
+                        "sentence": lib_sentence,
+                        "author": lib_author,
+                        "path": "",
+                    })
+
+        if libs:
+            self.log(f"[LIBS OK] {len(libs)} entradas de bibliotecas com histórico")
         else:
             self.log("[LIBS WARN] Nenhuma biblioteca encontrada")
         
-        return normalized
+        return libs
 
     def install_library_zip_sync(self, zip_path: str) -> tuple:
         """Instala biblioteca de arquivo ZIP com retorno detalhado."""
