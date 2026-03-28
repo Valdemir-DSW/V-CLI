@@ -21,10 +21,11 @@ import queue
 
 try:
     import pystray
-    from PIL import Image
+    from PIL import Image, ImageDraw
 except Exception:
     pystray = None
     Image = None
+    ImageDraw = None
 
 
 class VCliApp(tk.Tk):
@@ -66,6 +67,9 @@ class VCliApp(tk.Tk):
         self.boards_cache = None
         self.boards_cache_time = 0
         self.boards_loading = False
+        self.boards_refresh_button = None
+        self._pending_close = False
+        self._libs_loading = False
         
         self._load_recent_projects()
         self._create_ui()  # IMPORTANTE: cria console ANTES do backend
@@ -439,7 +443,8 @@ class VCliApp(tk.Tk):
         
         bframe = ttk.Frame(tab)
         bframe.pack(fill=tk.X, padx=2, pady=2)
-        ttk.Button(bframe, text="Atualizar", command=self._load_boards).pack(side=tk.LEFT, padx=1, expand=True, fill=tk.X)
+        self.boards_refresh_button = ttk.Button(bframe, text="Atualizar", command=self._load_boards)
+        self.boards_refresh_button.pack(side=tk.LEFT, padx=1, expand=True, fill=tk.X)
         ttk.Button(bframe, text="Adicionar ZIP", command=self._add_board_zip).pack(side=tk.LEFT, padx=1, expand=True, fill=tk.X)
         ttk.Button(bframe, text="Gerenciador", command=self._open_board_manager).pack(side=tk.LEFT, padx=1, expand=True, fill=tk.X)
         
@@ -637,6 +642,10 @@ class VCliApp(tk.Tk):
         if not Path(path).exists():
             self._show_status_popup(self.t("tray.project_missing", "Project not found"), path, is_error=True)
             return
+        config = self.backend.load_project(str(path))
+        if not config:
+            self._show_status_popup(self.t("error.title", "Error"), f"Falha ao carregar: {Path(path).name}", is_error=True)
+            return
         self._load_project_path(path)
         self._show_status_popup(self.t("tray.project_loaded", "Project loaded"), Path(path).name)
 
@@ -667,11 +676,13 @@ class VCliApp(tk.Tk):
         self.hide_to_tray_enabled = not self.hide_to_tray_enabled
         self.app_settings["hide_to_tray"] = self.hide_to_tray_enabled
         self._save_app_settings()
+        self._refresh_tray_menu()
 
     def _tray_toggle_start_in_tray(self):
         self.start_in_tray_enabled = not self.start_in_tray_enabled
         self.app_settings["start_in_tray"] = self.start_in_tray_enabled
         self._save_app_settings()
+        self._refresh_tray_menu()
 
     def _tray_quit(self):
         self._is_quitting = True
@@ -683,59 +694,130 @@ class VCliApp(tk.Tk):
             self.tray_icon = None
         self.destroy()
 
+    def _tray_menu_callback(self, fn):
+        return lambda icon, item: self._call_ui(fn)
+
     def _refresh_tray_menu(self):
+        """Atualiza menu da bandeja de forma simples e confiável."""
         if not self.tray_icon:
+            self.log("[AVISO] Tray icon não disponível ao atualizar menu")
             return
-        try:
-            items = [
-                pystray.MenuItem(self.t("tray.show", "Show window"), lambda icon, item: self._call_ui(self._tray_show_window)),
-                pystray.MenuItem(self.t("tray.hide", "Hide window"), lambda icon, item: self._call_ui(self._tray_hide_window)),
-                pystray.Menu.SEPARATOR,
-            ]
-            items.extend(self._tray_recent_projects_flat_items())
-            items.extend([
-                pystray.Menu.SEPARATOR,
-                pystray.MenuItem(
-                    self.t("tray.hide_on_close", "Hide on close"),
-                    lambda icon, item: self._call_ui(self._tray_toggle_hide_option),
-                    checked=lambda item: self.hide_to_tray_enabled,
-                ),
-                pystray.MenuItem(
-                    self.t("tray.start_in_tray", "Start in tray"),
-                    lambda icon, item: self._call_ui(self._tray_toggle_start_in_tray),
-                    checked=lambda item: self.start_in_tray_enabled,
-                ),
-                pystray.Menu.SEPARATOR,
-                pystray.MenuItem(self.t("btn.compile", "Compile"), lambda icon, item: self._call_ui(self._tray_compile)),
-                pystray.MenuItem(self.t("btn.export_binary", "Export binary"), lambda icon, item: self._call_ui(self._tray_export)),
-                pystray.MenuItem(self.t("btn.upload", "Upload"), lambda icon, item: self._call_ui(self._tray_upload)),
-                pystray.Menu.SEPARATOR,
-                pystray.MenuItem(self.t("tray.quit", "Quit"), lambda icon, item: self._call_ui(self._tray_quit)),
-            ])
-            self.tray_icon.menu = pystray.Menu(*items)
-            self.tray_icon.update_menu()
-        except Exception as exc:
-            self.log(f"[AVISO] Não foi possível atualizar menu da bandeja: {exc}")
+        
+        def update_menu():
+            try:
+                items = [
+                    pystray.MenuItem(self.t("tray.show", "Show window"), self._tray_menu_callback(self._tray_show_window)),
+                    pystray.MenuItem(self.t("tray.hide", "Hide window"), self._tray_menu_callback(self._tray_hide_window)),
+                    pystray.Menu.SEPARATOR,
+                ]
+                
+                # Adicionar projetos recentes
+                try:
+                    recent_items = self._tray_recent_projects_flat_items()
+                    items.extend(recent_items)
+                except Exception as e:
+                    self.log(f"[AVISO] Erro ao carregar projetos recentes no menu: {e}")
+                
+                items.extend(
+                    [
+                        pystray.Menu.SEPARATOR,
+                        pystray.MenuItem(
+                            "Atualizar placas",
+                            self._tray_menu_callback(self._load_boards),
+                        ),
+                        pystray.MenuItem(
+                            "Gerenciador de placas",
+                            self._tray_menu_callback(self._open_board_manager),
+                        ),
+                        pystray.Menu.SEPARATOR,
+                        pystray.MenuItem(
+                            "Atualizar bibliotecas",
+                            self._tray_menu_callback(self._load_libs),
+                        ),
+                        pystray.MenuItem(
+                            "Gerenciador de bibliotecas",
+                            self._tray_menu_callback(self._open_library_manager),
+                        ),
+                        pystray.Menu.SEPARATOR,
+                        pystray.MenuItem(
+                            self.t("tray.hide_on_close", "Hide on close"),
+                            self._tray_menu_callback(self._tray_toggle_hide_option),
+                            checked=lambda item: self.hide_to_tray_enabled,
+                        ),
+                        pystray.MenuItem(
+                            self.t("tray.start_in_tray", "Start in tray"),
+                            self._tray_menu_callback(self._tray_toggle_start_in_tray),
+                            checked=lambda item: self.start_in_tray_enabled,
+                        ),
+                        pystray.Menu.SEPARATOR,
+                        pystray.MenuItem(self.t("btn.compile", "Compile"), self._tray_menu_callback(self._tray_compile)),
+                        pystray.MenuItem(
+                            self.t("btn.export_binary", "Export binary"),
+                            self._tray_menu_callback(self._tray_export),
+                        ),
+                        pystray.MenuItem(self.t("btn.upload", "Upload"), self._tray_menu_callback(self._tray_upload)),
+                        pystray.Menu.SEPARATOR,
+                        pystray.MenuItem(self.t("tray.quit", "Quit"), self._tray_menu_callback(self._tray_quit)),
+                    ]
+                )
+                
+                # Atualizar menu
+                if self.tray_icon and pystray:
+                    self.tray_icon.menu = pystray.Menu(*items)
+                    try:
+                        self.tray_icon.update_menu()
+                        self.log("[OK] Menu da bandeja atualizado com sucesso")
+                    except Exception as e:
+                        self.log(f"[AVISO] Tipo de erro em update_menu: {type(e).__name__}: {e}")
+            except Exception as exc:
+                self.log(f"[ERRO] Erro crítico ao atualizar menu: {exc}")
+        
+        # Executar atualização em thread separada
+        threading.Thread(target=update_menu, daemon=True).start()
 
     def _setup_system_tray(self):
         if pystray is None or Image is None:
             self.log("[AVISO] pystray não disponível; bandeja do Windows desativada.")
             return
-        try:
-            icon_image = Image.open(str(self.app_icon_path))
-        except Exception:
-            self.log("[AVISO] Ícone da bandeja não encontrado.")
+        icon_image = None
+        if Image:
+            if self.app_icon_path.exists():
+                try:
+                    icon_image = Image.open(str(self.app_icon_path))
+                except Exception:
+                    self.log("[AVISO] Ícone da bandeja não carregado.")
+            if icon_image is None:
+                icon_image = Image.new("RGBA", (64, 64), "#0078d4")
+                if ImageDraw:
+                    draw = ImageDraw.Draw(icon_image)
+                    draw.rectangle([0, 0, 63, 63], outline="white", width=2)
+                    draw.text((18, 18), "V", fill="white")
+                self.log("[AVISO] Ícone da bandeja ausente; usando fallback.")
+        if icon_image is None:
+            self.log("[AVISO] PIL não disponível; bandeja desativada.")
             return
 
         try:
             self.tray_icon = pystray.Icon("vcli", icon_image, "V CLI")
-            self._refresh_tray_menu()
+            # Não chamar _refresh_tray_menu aqui - precisa ser feito após run_detached
             # On Windows, detached mode is more reliable for right-click context menu.
             self.tray_icon.run_detached()
+            # Aguardar um pouco para pystray estar pronto, depois atualizar menu
+            self.after(500, self._refresh_tray_menu)
         except Exception as exc:
             self.log(f"[ERRO] Falha ao iniciar bandeja: {exc}")
 
-    def _on_main_window_close(self):
+    def _on_main_window_close(self, force=False):
+        if not force and self.backend and self.backend.is_action_running():
+            if messagebox.askyesno(
+                self.t("tray.quit", "Quit"),
+                "Uma operação está em andamento. Deseja abortá-la e prosseguir com o fechamento?",
+            ):
+                self._pending_close = True
+                self._request_abort_action()
+                self.after(200, self._check_pending_close)
+            return
+
         if self._is_quitting:
             self.destroy()
             return
@@ -743,6 +825,15 @@ class VCliApp(tk.Tk):
             self._tray_hide_window()
             return
         self._tray_quit()
+
+    def _check_pending_close(self):
+        if not self._pending_close:
+            return
+        if self.backend and self.backend.is_action_running():
+            self.after(200, self._check_pending_close)
+            return
+        self._pending_close = False
+        self._on_main_window_close(force=True)
 
     def _load_recent_projects(self):
         try:
@@ -777,7 +868,7 @@ class VCliApp(tk.Tk):
         self._refresh_tray_menu()
     
     def _open_recent(self, event):
-        selection =self.recent_listbox.curselection()
+        selection = self.recent_listbox.curselection()
         if not selection:
             return
         path = self.recent_projects[selection[0]]
@@ -920,6 +1011,8 @@ class VCliApp(tk.Tk):
             self.current_config = config
             self._add_to_recent(path)
             self._update_project_info()
+        else:
+            self.log(f"[ERRO] Falha ao carregar projeto: {path}")
     
     def _update_project_info(self):
         if not self.current_config or not self.current_project:
@@ -1353,17 +1446,40 @@ class VCliApp(tk.Tk):
         ttk.Button(btn_frame, text="Cancelar", command=on_cancel).pack(side=tk.LEFT, padx=5, expand=True, fill=tk.X)
     
     def _load_boards(self):
-        # Usar cache em threading para não travar
+        if self.boards_loading:
+            self.log("[BOARDS] Carregamento já em progresso, ignorando...")
+            return
+        self._set_boards_refresh_state(True)
+        self.log("[BOARDS] Iniciando atualização de placas...")
+
         def load_thread():
-            boards = self.backend.list_boards()
-            self.boards_cache = boards
-            self.boards_cache_time = time.time()
-            
-            self.after(0, lambda: self._update_boards_tree(boards))
-        
-        import threading
+            boards = []
+            try:
+                boards = self.backend.list_boards()
+                self.log(f"[BOARDS] Obtidas {len(boards) if boards else 0} placas do backend")
+            except Exception as exc:
+                self.log(f"[BOARDS] Erro ao atualizar placas: {exc}")
+            finally:
+                # Usa ui_queue para thread-safety
+                self.ui_queue.put((self._finish_loading_boards, (boards,), {}))
+
         threading.Thread(target=load_thread, daemon=True).start()
-    
+
+    def _finish_loading_boards(self, boards):
+        self.boards_cache = boards or []
+        self.boards_cache_time = time.time()
+        self._update_boards_tree(self.boards_cache)
+        self._set_boards_refresh_state(False)
+
+    def _set_boards_refresh_state(self, loading: bool):
+        self.boards_loading = loading
+        if not self.boards_refresh_button:
+            return
+        if loading:
+            self.boards_refresh_button.state(["disabled"])
+        else:
+            self.boards_refresh_button.state(["!disabled"])
+
     def _update_boards_tree(self, boards):
         """Atualiza tree de placas na UI"""
         self.boards_tree.delete(*self.boards_tree.get_children())
@@ -2351,15 +2467,43 @@ class VCliApp(tk.Tk):
     
     # BIBLIOTECAS
     def _load_libs(self):
+        if hasattr(self, '_libs_loading') and self._libs_loading:
+            self.log("[LIBS] Carregamento já em progresso, ignorando...")
+            return
+        self._libs_loading = True
+        self.log("[LIBS] Iniciando atualização de bibliotecas...")
+
+        def load_thread():
+            libs = []
+            try:
+                # Tenta o parser fixed primeiro (mais robusto), depois o padrão
+                self.log("[LIBS] Tentando list_libraries_fixed...")
+                libs = self.backend.list_libraries_fixed()
+                self.log(f"[LIBS] list_libraries_fixed retornou {len(libs) if libs else 0} bibls")
+                if not libs:
+                    self.log("[LIBS] Tentando list_libraries...")
+                    libs = self.backend.list_libraries()
+                    self.log(f"[LIBS] list_libraries retornou {len(libs) if libs else 0} bibls")
+            except Exception as exc:
+                self.log(f"[LIBS] Erro ao atualizar bibliotecas: {exc}")
+            finally:
+                self.ui_queue.put((self._finish_loading_libs, (libs,), {}))
+
+        threading.Thread(target=load_thread, daemon=True).start()
+
+    def _finish_loading_libs(self, libs):
+        """Atualiza UI com as bibliotecas carregadas."""
+        self._libs_loading = False
         self.libs_tree.delete(*self.libs_tree.get_children())
-        libs = self.backend.list_libraries_fixed()
-        if not libs:
-            libs = self.backend.list_libraries()
-        self.loaded_libraries = libs
-        for lib in libs:
-            self.libs_tree.insert("", tk.END, text=lib.get("name", "?"), 
-                                 values=(lib.get("version", ""), lib.get("sentence", "")[:40]))
-        self.log("Bibliotecas carregadas")
+        self.loaded_libraries = libs or []
+        
+        for lib in self.loaded_libraries:
+            name = lib.get("name", "?")
+            version = lib.get("version", "N/A")
+            sentence = lib.get("sentence", "")[:40]
+            self.libs_tree.insert("", tk.END, text=name, values=(version, sentence))
+        
+        self.log(f"Bibliotecas carregadas: {len(self.loaded_libraries)} encontradas")
 
     def _on_lib_double_click(self, event):
         sel = self.libs_tree.selection()
@@ -2694,6 +2838,7 @@ class VCliApp(tk.Tk):
         self.log("Bibliotecas carregadas")
 
     def _start_initial_loading(self):
+        self.log("[STARTUP] Iniciando carregamento inicial...")
         startup_modal = self._show_startup_modal()
 
         def load_thread():
@@ -2702,13 +2847,23 @@ class VCliApp(tk.Tk):
             libs = []
             ports = []
             try:
+                self.log("[STARTUP] Carregando placas...")
                 boards = self.backend.list_boards()
+                self.log(f"[STARTUP] Placas carregadas: {len(boards) if boards else 0}")
+                
+                self.log("[STARTUP] Carregando bibliotecas...")
                 libs = self.backend.list_libraries_fixed()
                 if not libs:
+                    self.log("[STARTUP] Tentando método alternativo para libs...")
                     libs = self.backend.list_libraries()
+                self.log(f"[STARTUP] Bibliotecas carregadas: {len(libs) if libs else 0}")
+                
+                self.log("[STARTUP] Obtendo portas seriais...")
                 ports = self._get_serial_ports()
+                self.log(f"[STARTUP] Portas encontradas: {len(ports) if ports else 0}")
             except Exception as e:
                 error_msg = str(e)
+                self.log(f"[STARTUP ERROR] {error_msg}")
 
             self.after(
                 0,

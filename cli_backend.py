@@ -213,6 +213,11 @@ class CLIBackend:
         except Exception:
             return False
 
+    def is_action_running(self) -> bool:
+        """Retorna True se um comando longo ainda estiver em execucao."""
+        with self._process_lock:
+            return self._current_process is not None
+
     def _run_action_command(self, cmd: list, timeout: int = 120) -> tuple:
         """Executa comando longo com suporte a cancelamento."""
         proc = None
@@ -264,14 +269,14 @@ class CLIBackend:
             pass  # Ignora erros de logging, nunca deve quebrar execuÃƒÂ§ÃƒÂ£o
     
     def run_cli_sync(self, args: list) -> str:
-        """Executa CLI de forma sÃƒÂ­ncrona e retorna output"""
+        """Executa CLI de forma síncrona e retorna output"""
         if not self.cli_path.exists():
-            self.log(f"Erro: arduino-cli nÃƒÂ£o encontrado em {self.cli_path}")
+            self.log(f"Erro: arduino-cli não encontrado em {self.cli_path}")
             return ""
         
         # Validar argumentos - garantir que nao ha None
         if not args or any(arg is None for arg in args):
-            self.log("[ERRO] Argumentos invÃƒÂ¡lidos para CLI")
+            self.log("[ERRO] Argumentos inválidos para CLI")
             return ""
         
         cmd = [str(self.cli_path), "--config-file", str(self.config_file)] + [str(arg) for arg in args]
@@ -279,15 +284,15 @@ class CLIBackend:
             result = self._run_subprocess(cmd, timeout=60)
             
             # Log do comando
-            cmd_short = ' '.join(str(a) for a in args[:2])
-            self.log(f"[COMANDO] {cmd_short}")
+            cmd_short = ' '.join(str(a) for a in args[:3])
+            self.log(f"[CLI] {cmd_short}")
             
             if result.returncode != 0:
                 # Erro do CLI
                 if result.stderr:
-                    self.log(f"[ERRO CLI] {result.stderr[:200]}")
+                    self.log(f"[CLI STDERR] {result.stderr[:300]}")
                 if result.stdout:
-                    self.log(f"[SAIDA] {result.stdout[:200]}")
+                    self.log(f"[CLI STDOUT] {result.stdout[:300]}")
                 return ""
             
             # Sucesso
@@ -299,7 +304,7 @@ class CLIBackend:
             self.log("[ERRO] Comando expirou (timeout 60s)")
             return ""
         except Exception as e:
-            self.log(f"[ERRO] ExceÃƒÂ§ÃƒÂ£o ao executar CLI: {e}")
+            self.log(f"[ERRO] Exceção ao executar CLI: {e}")
             return ""
     
     def run_cli_async(self, args: list):
@@ -621,29 +626,52 @@ void loop() {
     # ==================== PLACAS ====================
     
     def list_boards(self) -> list:
-        """Lista todas as placas disponÃƒÂ­veis"""
+        """Lista todas as placas disponíveis com suporte a versões antigas."""
+        self.log("[BOARDS] Iniciando list_boards...")
+        # Usa apenas listall sem flags adicionais (arduino-cli não tem --all)
         output = self.run_cli_sync(["board", "listall", "--format", "json"])
         
+        self.log(f"[BOARDS] Output length: {len(output) if output else 0}")
+        
         if not output or not output.strip():
-            self.log("[AVISO] Nenhuma placa disponÃƒÂ­vel. Verifique a configuraÃƒÂ§ÃƒÂ£o.")
+            self.log("[BOARDS] AVISO: Nenhuma placa disponível. Verifique a configuração.")
             return []
         
         try:
             data = self._parse_cli_json(output)
-            if not isinstance(data, dict):
-                self.log("[ERRO] JSON invÃƒÂ¡lido ao parsear placas")
+            if data is None:
+                self.log("[BOARDS] ERRO: JSON inválido ao parsear")
                 return []
+            
+            if not isinstance(data, dict):
+                self.log(f"[BOARDS] ERRO: JSON não é dict, é {type(data)}")
+                return []
+            
             boards = data.get("boards", [])
+            self.log(f"[BOARDS] Encontradas {len(boards) if boards else 0} placas com key 'boards'")
+            
+            # Se temos uma chave "board" singular também, tenta
+            if not boards and "board" in data:
+                board_item = data.get("board")
+                boards = board_item if isinstance(board_item, list) else [board_item]
+                self.log(f"[BOARDS] Encontradas {len(boards)} placas com key 'board'")
+            
+            # Garante que cada placa tem os campos necessários
+            for board in boards:
+                if isinstance(board, dict):
+                    board.setdefault("name", board.get("name", board.get("title", "Desconhecida")))
+                    board.setdefault("fqbn", board.get("fqbn", ""))
+            
             if boards:
-                self.log(f"Carregadas {len(boards)} placas")
+                self.log(f"[BOARDS OK] Carregadas {len(boards)} placas")
             else:
-                self.log("[AVISO] Nenhuma placa encontrada")
+                self.log("[BOARDS WARN] Nenhuma placa encontrada")
             return boards
         except json.JSONDecodeError as e:
-            self.log(f"[ERRO] JSON invÃƒÂ¡lido ao parsear placas: {str(e)[:100]}")
+            self.log(f"[BOARDS JSON ERROR] {str(e)[:100]}")
             return []
         except Exception as e:
-            self.log(f"[ERRO] Erro ao listar placas: {e}")
+            self.log(f"[BOARDS ERROR] {e}")
             return []
     
     def get_board_variants(self, fqbn: str) -> list:
@@ -942,6 +970,12 @@ void loop() {
 
     def _core_catalog(self) -> Dict[str, dict]:
         catalog: Dict[str, dict] = {}
+
+        def _add_core_version(entry_versions: list, value):
+            cleaned = str(value or "").strip()
+            if cleaned and cleaned not in entry_versions:
+                entry_versions.append(cleaned)
+
         for idx_file in self._iter_package_index_files():
             data = self._load_json_file(idx_file)
             if not isinstance(data, dict):
@@ -958,7 +992,6 @@ void loop() {
                     if not pkg_name or not arch:
                         continue
                     core_id = f"{pkg_name}:{arch}"
-                    version = str(platform.get("version") or "").strip()
                     entry = catalog.setdefault(
                         core_id,
                         {
@@ -969,8 +1002,13 @@ void loop() {
                             "latest_version": "",
                         },
                     )
-                    if version and version not in entry["versions"]:
-                        entry["versions"].append(version)
+                    _add_core_version(entry["versions"], platform.get("version"))
+                    releases = platform.get("releases")
+                    if not isinstance(releases, list):
+                        releases = []
+                    for rel in releases:
+                        rel_version = rel.get("version") if isinstance(rel, dict) else rel
+                        _add_core_version(entry["versions"], rel_version)
         for entry in catalog.values():
             entry["versions"].sort(key=lambda v: self._normalize_version(v), reverse=True)
             if entry["versions"]:
@@ -1199,34 +1237,63 @@ void loop() {
     
     def list_libraries_fixed(self) -> list:
         """Parsing robusto para a aba Bibliotecas."""
+        self.log("[LIBS] Iniciando list_libraries_fixed...")
+        # arduino-cli lib list mostra apenas bibliotecas instaladas, não versões antigas
         output = self.run_cli_sync(["lib", "list", "--format", "json"])
+        
+        self.log(f"[LIBS] Output length: {len(output) if output else 0}")
+        
         if not output or not output.strip():
-            self.log("[INFO] Nenhuma biblioteca instalada")
+            self.log("[LIBS] INFO: Nenhuma biblioteca instalada")
             return []
 
         data = self._parse_cli_json(output)
         if data is None:
-            self.log("[ERRO] JSON invalido ao listar bibliotecas")
+            self.log("[LIBS] ERRO: JSON inválido")
             return []
 
         raw_libs = []
         if isinstance(data, dict):
             if "installed_libraries" in data:
                 raw_libs = data.get("installed_libraries", [])
+                self.log(f"[LIBS] Found {len(raw_libs)} via 'installed_libraries'")
             elif "libraries" in data:
                 raw_libs = data.get("libraries", [])
+                self.log(f"[LIBS] Found {len(raw_libs)} via 'libraries'")
+            elif "library" in data:
+                raw_item = data.get("library")
+                raw_libs = raw_item if isinstance(raw_item, list) else [raw_item]
+                self.log(f"[LIBS] Found {len(raw_libs)} via 'library'")
             else:
+                # Tenta extrair como dict direto  
                 raw_libs = [v for v in data.values() if isinstance(v, dict)]
+                self.log(f"[LIBS] Found {len(raw_libs)} via generic dict extraction")
         elif isinstance(data, list):
             raw_libs = data
+            self.log(f"[LIBS] Found {len(raw_libs)} as direct list")
 
+        self.log(f"[LIBS] Processing {len(raw_libs)} raw items...")
+        
         libs = []
         for item in raw_libs:
             if not isinstance(item, dict):
                 continue
+            
+            # Estrutura pode variar - tenta múltiplas
             lib_obj = item.get("library") if isinstance(item.get("library"), dict) else item
             rel_obj = item.get("release") if isinstance(item.get("release"), dict) else {}
             inst_obj = item.get("installed") if isinstance(item.get("installed"), dict) else {}
+            
+            # Extrai nome
+            name = (
+                lib_obj.get("name")
+                or lib_obj.get("title")
+                or item.get("name")
+                or item.get("title")
+                or "Desconhecida"
+            )
+            
+            # Extrai caminho
             path_value = (
                 item.get("path")
                 or item.get("location")
@@ -1236,20 +1303,8 @@ void loop() {
                 or inst_obj.get("path")
                 or ""
             )
-            name = (
-                lib_obj.get("name")
-                or lib_obj.get("title")
-                or item.get("name")
-                or item.get("title")
-                or "Desconhecida"
-            )
-            version = (
-                inst_obj.get("version")
-                or rel_obj.get("version")
-                or lib_obj.get("version")
-                or item.get("version")
-                or "N/A"
-            )
+            
+            # Descrição
             sentence = (
                 lib_obj.get("sentence")
                 or lib_obj.get("paragraph")
@@ -1258,19 +1313,38 @@ void loop() {
                 or item.get("description")
                 or ""
             )
-            libs.append({"name": name, "version": version, "sentence": sentence, "path": path_value})
+            
+            # Extrai versão - tenta ordem de prioridade
+            version = (
+                inst_obj.get("version")
+                or rel_obj.get("version")
+                or lib_obj.get("version")
+                or item.get("version")
+                or item.get("latest")
+                or "N/A"
+            )
+            
+            libs.append({
+                "name": name,
+                "version": version,
+                "sentence": sentence,
+                "path": path_value,
+            })
 
+        # Remove duplicatas mantendo ordem (libname@version)
         unique = {}
         for lib in libs:
-            key = f"{lib.get('name','').strip().lower()}::{lib.get('version','').strip().lower()}"
+            key = f"{lib.get('name','').strip().lower()}@{lib.get('version','').strip().lower()}"
             if key not in unique:
                 unique[key] = lib
+        
         normalized = list(unique.values())
 
         if normalized:
-            self.log(f"[OK] Carregadas {len(normalized)} bibliotecas")
+            self.log(f"[LIBS OK] Carregadas {len(normalized)} bibliotecas")
         else:
-            self.log("[INFO] Nenhuma biblioteca encontrada")
+            self.log("[LIBS WARN] Nenhuma biblioteca encontrada")
+        
         return normalized
 
     def install_library_zip_sync(self, zip_path: str) -> tuple:
@@ -1335,6 +1409,12 @@ void loop() {
         catalog: Dict[str, dict] = {}
         if not isinstance(data, dict):
             return catalog
+
+        def _add_library_version(entry_versions: list, value):
+            cleaned = str(value or "").strip()
+            if cleaned and cleaned not in entry_versions:
+                entry_versions.append(cleaned)
+
         for lib in data.get("libraries", []):
             if not isinstance(lib, dict):
                 continue
@@ -1353,9 +1433,13 @@ void loop() {
                     "latest_version": "",
                 },
             )
-            ver = str(lib.get("version") or "").strip()
-            if ver and ver not in entry["versions"]:
-                entry["versions"].append(ver)
+            _add_library_version(entry["versions"], lib.get("version"))
+            releases = lib.get("releases")
+            if not isinstance(releases, list):
+                releases = []
+            for rel in releases:
+                rel_version = rel.get("version") if isinstance(rel, dict) else rel
+                _add_library_version(entry["versions"], rel_version)
         for entry in catalog.values():
             entry["versions"].sort(key=lambda v: self._normalize_version(v), reverse=True)
             entry["latest_version"] = entry["versions"][0] if entry["versions"] else ""
