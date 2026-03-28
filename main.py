@@ -2147,7 +2147,7 @@ class VCliApp(tk.Tk):
                 if term and term not in f"{name} {lib.get('sentence','')}".lower():
                     continue
 
-                installed_v = lib.get("version", "")
+                installed_v = lib.get("installed_version", "")
                 latest_v = lib.get("latest_version", "")
                 versions = list(lib.get("versions", []))
                 if latest_v and latest_v not in versions:
@@ -2297,9 +2297,12 @@ class VCliApp(tk.Tk):
                                 "sentence": lib.get("sentence", ""),
                                 "url": lib.get("url", ""),
                             }
-                        # Adicione a versão encontrada
-                        if lib.get("version"):
-                            libraries_by_name[lib_name]["versions"].add(lib.get("version"))
+                        # Adicione TODAS as versões da busca
+                        versions_list = lib.get("versions", [])
+                        if isinstance(versions_list, list):
+                            for v in versions_list:
+                                if v:
+                                    libraries_by_name[lib_name]["versions"].add(v)
                 
                 # Carrega TODAS versões para bibliotecas instaladas (mesmo se não aparecem na busca)
                 all_library_entries = self.backend.list_libraries_all_versions()
