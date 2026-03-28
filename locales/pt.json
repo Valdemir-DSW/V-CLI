@@ -50,6 +50,8 @@
   "info.loading_boards": "Carregando placas...",
   "boards.title": "Placas",
   "boards.updated_success": "Placas atualizadas com sucesso",
+  "boards.zip_select_title": "Selecione o ZIP de placas",
+  "boards.zip_added_success": "ZIP de placas adicionado com sucesso",
   "libs.title": "Biblioteca",
   "libs.path_not_found": "Não foi possível localizar o caminho da biblioteca",
   "error.title": "Erro",

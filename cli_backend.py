@@ -26,8 +26,11 @@ import json
 import subprocess
 import threading
 import time
+import zipfile
 from pathlib import Path
 from typing import Callable, Optional, Dict, Any
+
+CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
 class CLIBackend:
@@ -51,6 +54,19 @@ class CLIBackend:
         
         # Inicializar CLI se necessário
         self._init_cli()
+
+    def _run_subprocess(self, cmd: list, timeout: int = 60):
+        """Wrapper para subprocess.run sem abrir janela no Windows."""
+        kwargs = {"capture_output": True, "text": True, "timeout": timeout}
+        if CREATE_NO_WINDOW:
+            kwargs["creationflags"] = CREATE_NO_WINDOW
+        return subprocess.run(cmd, **kwargs)
+
+    def _popen_subprocess(self, cmd: list, **kwargs):
+        """Wrapper para subprocess.Popen sem abrir janela no Windows."""
+        if CREATE_NO_WINDOW:
+            kwargs.setdefault("creationflags", CREATE_NO_WINDOW)
+        return subprocess.Popen(cmd, **kwargs)
     
     def _init_cli(self):
         """Inicializa configuração do CLI"""
@@ -122,7 +138,7 @@ class CLIBackend:
         try:
             with self._process_lock:
                 self._abort_requested = False
-            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            proc = self._popen_subprocess(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             with self._process_lock:
                 self._current_process = proc
 
@@ -179,7 +195,7 @@ class CLIBackend:
         
         cmd = [str(self.cli_path), "--config-file", str(self.config_file)] + [str(arg) for arg in args]
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            result = self._run_subprocess(cmd, timeout=60)
             
             # Log do comando
             cmd_short = ' '.join(str(a) for a in args[:2])
@@ -293,70 +309,89 @@ class CLIBackend:
             self.log(f"Arquivo project.fuzil criado em {fuse_file}")
         except Exception as e:
             self.log(f"Erro ao criar project.fuzil: {e}")
-    
-    def create_project(self, project_path: str, project_name: Optional[str] = None) -> bool:
+    def _get_ino_template(self, project_name: str, template_key: str = "clean") -> str:
+        """Retorna conteudo do .ino conforme preset selecionado."""
+        templates = {
+            "clean": """void setup() {
+}
+
+void loop() {
+}
+""",
+            "serial": f"""void setup() {{
+  Serial.begin(115200);
+  while (!Serial) {{
+    ; // Aguarda Serial em placas que exigem
+  }}
+  Serial.println("Projeto {project_name} iniciado");
+}}
+
+void loop() {{
+  Serial.println("Rodando...");
+  delay(1000);
+}}
+""",
+            "blink_delay": """const int LED_PIN = LED_BUILTIN;
+
+void setup() {
+  pinMode(LED_PIN, OUTPUT);
+}
+
+void loop() {
+  digitalWrite(LED_PIN, HIGH);
+  delay(500);
+  digitalWrite(LED_PIN, LOW);
+  delay(500);
+}
+""",
+            "blink_non_blocking": """const int LED_PIN = LED_BUILTIN;
+const unsigned long BLINK_INTERVAL_MS = 500;
+unsigned long last_blink_ms = 0;
+bool led_state = false;
+
+void setup() {
+  pinMode(LED_PIN, OUTPUT);
+}
+
+void loop() {
+  unsigned long now = millis();
+  if (now - last_blink_ms >= BLINK_INTERVAL_MS) {
+    last_blink_ms = now;
+    led_state = !led_state;
+    digitalWrite(LED_PIN, led_state ? HIGH : LOW);
+  }
+
+  // Outras tarefas podem rodar aqui sem travar o loop
+}
+""",
+        }
+        return templates.get(template_key, templates["clean"])
+
+    def create_project(self, project_path: str, project_name: Optional[str] = None, template_key: str = "clean") -> bool:
         """
         Cria novo projeto
         """
         project_path = Path(project_path)
         project_path.mkdir(parents=True, exist_ok=True)
-        
+
         if not project_name:
             project_name = project_path.name
-        
+
         # Criar arquivo .ino
         ino_file = project_path / f"{project_name}.ino"
         if not ino_file.exists():
             try:
-                ino_template = '''/*
- * Projeto: {name}
- * VCLI - CLI leve com histórico, console em destaque e fluxo direto para arduino-cli.
- * Características: padrão de projeto, comentários VCLI e dicas rápidas de processamento.
- * Dicas: mantenha o loop enxuto, use Serial.println para debugar e centralize configurações aqui.
- */
-
-// ========== VARIÁVEIS GLOBAIS ==========
-// Declare constantes e variáveis que serão reutilizadas no projeto
-
-
-// ========== SETUP ==========
-// Executado UMA VEZ quando a placa inicia
-void setup() {{
-  // Inicialize monitoramento serial para acompanhar logs
-  Serial.begin(115200);
-  Serial.println("[SETUP] {name} inicializado");
-
-  // Configure pinos e periféricos
-  // pinMode(LED_BUILTIN, OUTPUT);
-  // pinMode(BUTTON_PIN, INPUT_PULLUP);
-}}
-
-
-// ========== LOOP ==========
-// Executado repetidamente enquanto a placa estiver ligada
-void loop() {{
-  // Código principal do seu projeto
-  
-  // Evite delays longos para manter a responsividade
-  // Serial.println("Executando ciclo principal");
-  // delay(1000);
-}}
-
-
-// ========== FUNÇÕES AUXILIARES ==========
-// Separe rotinas reutilizáveis aqui para manter o loop limpo
-
-'''.format(name=project_name)
+                ino_template = self._get_ino_template(project_name, template_key)
                 with open(ino_file, 'w', encoding='utf-8') as f:
                     f.write(ino_template)
-                self.log(f"Arquivo {project_name}.ino criado com template")
+                self.log(f"Arquivo {project_name}.ino criado com template '{template_key}'")
             except Exception as e:
                 self.log(f"Erro ao criar arquivo .ino: {e}")
                 return False
-        
+
         # Criar project.fuzil
         self._create_default_fuzil(project_path)
-        
+
         self.log(f"Projeto '{project_name}' criado com sucesso")
         return True
     
@@ -374,7 +409,7 @@ void loop() {{
         cmd += self._build_board_option_args(config)
         cmd.append(str(project_path))
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            result = self._run_subprocess(cmd, timeout=120)
             
             output = result.stdout + result.stderr
             
@@ -415,7 +450,7 @@ void loop() {{
         cmd.append(str(project_path))
 
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            result = self._run_subprocess(cmd, timeout=120)
 
             output = result.stdout + result.stderr
 
@@ -442,7 +477,7 @@ void loop() {{
         cmd += self._build_board_option_args(config)
         cmd.append(str(project_path))
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            result = self._run_subprocess(cmd, timeout=120)
             
             output = result.stdout + result.stderr
             
@@ -712,6 +747,58 @@ void loop() {{
 
         self.log(f"URL de placas registrado: {url}")
         return (output_total, True, "")
+
+    def add_board_zip_sync(self, zip_path: str, progress_callback: Optional[Callable[[str], None]] = None) -> tuple:
+        """Adiciona suporte a placas a partir de ZIP com package*_index.json."""
+        if not zip_path:
+            return ("", False, "Caminho do ZIP invalido")
+
+        zip_file = Path(zip_path)
+        if not zip_file.exists():
+            return ("", False, f"ZIP nao encontrado: {zip_file}")
+
+        if zip_file.suffix.lower() != ".zip":
+            return ("", False, "Arquivo selecionado nao e um ZIP")
+
+        extracted_root = self.base_dir / "board_indexes"
+        extracted_root.mkdir(parents=True, exist_ok=True)
+        extracted_dir = extracted_root / f"{zip_file.stem}_{int(time.time())}"
+
+        try:
+            if progress_callback:
+                progress_callback("Extraindo ZIP de placas...")
+            with zipfile.ZipFile(zip_file, "r") as zf:
+                zf.extractall(extracted_dir)
+        except Exception as e:
+            return ("", False, f"Falha ao extrair ZIP: {e}")
+
+        index_candidates = list(extracted_dir.rglob("package*_index.json"))
+        if not index_candidates:
+            return ("", False, "Nao foi encontrado arquivo package*_index.json dentro do ZIP")
+
+        index_file = index_candidates[0].resolve()
+        index_uri = index_file.as_uri()
+        output_total = ""
+
+        steps = [
+            ("Registrando indice local de placas...", ["config", "add", "board_manager.additional_urls", index_uri]),
+            ("Atualizando indice de placas...", ["core", "update-index"]),
+        ]
+
+        for label, args in steps:
+            if progress_callback:
+                progress_callback(label)
+            cmd = [str(self.cli_path), "--config-file", str(self.config_file)] + args
+            out, success, err = self._run_action_command(cmd, timeout=120)
+            output_total += out
+
+            # Se URL ja existe no config, tratamos como sucesso para seguir fluxo
+            already_exists = "already exists" in (out or "").lower() or "ja existe" in (out or "").lower()
+            if not success and not already_exists:
+                return (output_total, False, f"{label} - {err}")
+
+        self.log(f"Indice local de placas registrado: {index_file}")
+        return (output_total, True, "")
     
     # ==================== BIBLIOTECAS ====================
     
@@ -909,7 +996,7 @@ void loop() {{
             return False
         
         try:
-            subprocess.Popen([editor, str(project_path)])
+            self._popen_subprocess([editor, str(project_path)])
             self.log(f"Editor '{editor}' aberto para {project_path.name}")
             return True
         except FileNotFoundError:
@@ -918,3 +1005,4 @@ void loop() {{
         except Exception as e:
             self.log(f"Erro ao abrir editor: {e}")
             return False
+

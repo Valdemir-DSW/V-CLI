@@ -51,7 +51,7 @@ class VCliApp(tk.Tk):
         self._create_ui()  # IMPORTANTE: cria console ANTES do backend
         self._apply_window_icon(self)
         self.backend = CLIBackend(os.getcwd(), self.log)  # Agora log() funciona
-        self.after(300, self._load_initial_data)
+        self.after(120, self._start_initial_loading)
 
     def _load_i18n(self):
         self.lang = self._detect_system_lang()
@@ -424,6 +424,7 @@ class VCliApp(tk.Tk):
         bframe.pack(fill=tk.X, padx=2, pady=2)
         ttk.Button(bframe, text="Atualizar", command=self._load_boards).pack(side=tk.LEFT, padx=1, expand=True, fill=tk.X)
         ttk.Button(bframe, text="Adicionar JSON", command=self._add_board_json).pack(side=tk.LEFT, padx=1, expand=True, fill=tk.X)
+        ttk.Button(bframe, text="Adicionar ZIP", command=self._add_board_zip).pack(side=tk.LEFT, padx=1, expand=True, fill=tk.X)
         
         cols = ("FQBN",)
         self.boards_tree = ttk.Treeview(tab, columns=cols, height=15)
@@ -555,19 +556,108 @@ class VCliApp(tk.Tk):
     
     # PROJETOS
     def _create_project(self):
-        folder = filedialog.askdirectory(title="[+] Selecione pasta para novo projeto")
-        if not folder:
+        parent_folder = filedialog.askdirectory(title="[+] Selecione a pasta base")
+        if not parent_folder:
             return
 
-        folder_path = Path(folder)
-        folder_path = self._ensure_project_path_clean(folder_path)
-        if folder_path is None:
+        parent_path = Path(parent_folder)
+        template_options = [
+            ("clean", "Default (limpo)"),
+            ("serial", "Exemplo Serial"),
+            ("blink_delay", "Piscar LED (com delay)"),
+            ("blink_non_blocking", "Piscar LED (sem travar loop)"),
+        ]
+        template_previews = {
+            "clean": "void setup() {\n}\n\nvoid loop() {\n}",
+            "serial": "void setup() {\n  Serial.begin(115200);\n}\n\nvoid loop() {\n  Serial.println(\"Rodando...\");\n  delay(1000);\n}",
+            "blink_delay": "void loop() {\n  digitalWrite(LED_BUILTIN, HIGH);\n  delay(500);\n  digitalWrite(LED_BUILTIN, LOW);\n  delay(500);\n}",
+            "blink_non_blocking": "void loop() {\n  if (millis() - last >= 500) {\n    last = millis();\n    // troca estado do LED\n  }\n}",
+        }
+
+        dialog = tk.Toplevel(self)
+        self._apply_window_icon(dialog)
+        dialog.title("Novo projeto")
+        dialog.geometry("500x360")
+        dialog.resizable(False, False)
+        dialog.transient(self)
+        dialog.grab_set()
+
+        ttk.Label(dialog, text="Criar novo projeto", font=("Arial", 10, "bold")).pack(anchor="w", padx=10, pady=(10, 5))
+        ttk.Label(dialog, text=f"Pasta base: {parent_path}", font=("Arial", 8)).pack(anchor="w", padx=10, pady=(0, 8))
+
+        name_row = ttk.Frame(dialog)
+        name_row.pack(fill=tk.X, padx=10, pady=4)
+        ttk.Label(name_row, text="Nome da pasta:", width=15).pack(side=tk.LEFT)
+        project_name_var = tk.StringVar(value="novo_projeto")
+        ttk.Entry(name_row, textvariable=project_name_var).pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        preset_row = ttk.Frame(dialog)
+        preset_row.pack(fill=tk.X, padx=10, pady=4)
+        ttk.Label(preset_row, text="Preset:", width=15).pack(side=tk.LEFT)
+        preset_var = tk.StringVar(value=template_options[0][0])
+        preset_combo = ttk.Combobox(
+            preset_row,
+            state="readonly",
+            textvariable=preset_var,
+            values=[label for _, label in template_options],
+        )
+        preset_combo.current(0)
+        preset_combo.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        ttk.Label(dialog, text="Prévia do template:", font=("Arial", 9, "bold")).pack(anchor="w", padx=10, pady=(8, 2))
+        preview = scrolledtext.ScrolledText(dialog, height=10, font=("Courier", 8))
+        preview.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 8))
+
+        selected = {"name": "", "template": "clean"}
+
+        def _update_preview(*_):
+            label = preset_combo.get()
+            key = next((k for k, lbl in template_options if lbl == label), "clean")
+            selected["template"] = key
+            preview.config(state=tk.NORMAL)
+            preview.delete("1.0", tk.END)
+            preview.insert("1.0", template_previews.get(key, template_previews["clean"]))
+            preview.config(state=tk.DISABLED)
+
+        _update_preview()
+        preset_combo.bind("<<ComboboxSelected>>", _update_preview)
+
+        def _confirm_create():
+            sanitized = self._sanitize_project_name(project_name_var.get())
+            if not sanitized:
+                messagebox.showwarning(self.t("warn.title", "Warning"), "Informe um nome válido para o projeto.")
+                return
+            target = parent_path / sanitized
+            if target.exists():
+                messagebox.showwarning(self.t("warn.title", "Warning"), f"A pasta '{sanitized}' já existe.")
+                return
+            selected["name"] = sanitized
+            dialog.destroy()
+
+        def _cancel():
+            selected["name"] = ""
+            dialog.destroy()
+
+        btn_row = ttk.Frame(dialog)
+        btn_row.pack(fill=tk.X, padx=10, pady=(0, 10))
+        ttk.Button(btn_row, text="Criar", command=_confirm_create).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 4))
+        ttk.Button(btn_row, text="Cancelar", command=_cancel).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(4, 0))
+
+        dialog.wait_window()
+
+        if not selected["name"]:
             return
-        if self.backend.create_project(str(folder_path), project_name=folder_path.name):
+
+        folder_path = parent_path / selected["name"]
+        if self.backend.create_project(
+            str(folder_path),
+            project_name=selected["name"],
+            template_key=selected["template"],
+        ):
             self._add_to_recent(folder_path)
             self._load_project_path(folder_path)
             self.log(f"[NEW] Projeto criado: {folder_path.name}")
-            self.log(f"[FILE] Arquivo: {folder_path.name}.ino (com setup() e loop())")
+            self.log(f"[FILE] Arquivo: {folder_path.name}.ino ({selected['template']})")
     
     def _open_project(self):
         folder = filedialog.askdirectory(title="Abrir projeto")
@@ -1071,6 +1161,40 @@ class VCliApp(tk.Tk):
             self._load_boards()
 
         threading.Thread(target=download_thread, daemon=True).start()
+
+    def _add_board_zip(self):
+        zip_path = filedialog.askopenfilename(
+            title=self.t("boards.zip_select_title", "Select board ZIP"),
+            filetypes=[("ZIP", "*.zip")],
+        )
+        if not zip_path:
+            return
+
+        busy_modal = self._show_busy_modal(
+            "Atualizar placas",
+            "Processando ZIP de placas...",
+            [
+                "[PRE-DEBUG]",
+                f"ZIP: {zip_path}",
+            ],
+        )
+
+        def update_status(text):
+            self.after(0, lambda: self._update_busy_modal(busy_modal, text))
+
+        def zip_thread():
+            output, success, err = self.backend.add_board_zip_sync(zip_path, progress_callback=update_status)
+            self.after(0, lambda: self._close_busy_modal(busy_modal))
+            if not success:
+                self._show_error_modal("Adicionar ZIP de placas", err, output)
+                return
+            messagebox.showinfo(
+                self.t("boards.title", "Boards"),
+                self.t("boards.zip_added_success", "Board ZIP added successfully"),
+            )
+            self._load_boards()
+
+        threading.Thread(target=zip_thread, daemon=True).start()
     
     def _update_boards_combo_cached(self):
         """Mantido por compatibilidade (seleção agora é via modal)."""
@@ -1603,10 +1727,90 @@ class VCliApp(tk.Tk):
         threading.Thread(target=monitor, daemon=True).start()
     
     # UTILS
+    def _show_startup_modal(self):
+        modal = tk.Toplevel(self)
+        modal.title("Carregando")
+        self._apply_window_icon(modal)
+        modal.geometry("360x120")
+        modal.resizable(False, False)
+        modal.transient(self)
+        modal.grab_set()
+        modal.protocol("WM_DELETE_WINDOW", lambda: None)
+
+        ttk.Label(modal, text="Inicializando V CLI...", font=("Arial", 10, "bold")).pack(
+            anchor="w", padx=12, pady=(12, 6)
+        )
+        status_var = tk.StringVar(value="Carregando placas, bibliotecas e portas...")
+        ttk.Label(modal, textvariable=status_var).pack(anchor="w", padx=12, pady=(0, 8))
+        progress = ttk.Progressbar(modal, mode="indeterminate")
+        progress.pack(fill=tk.X, padx=12, pady=(0, 12))
+        progress.start(12)
+        return {"window": modal, "progress": progress, "status_var": status_var}
+
+    def _close_startup_modal(self, modal_data):
+        if not modal_data:
+            return
+        try:
+            progress = modal_data.get("progress")
+            win = modal_data.get("window")
+            if progress:
+                progress.stop()
+            if win and win.winfo_exists():
+                win.grab_release()
+                win.destroy()
+        except Exception:
+            pass
+
+    def _populate_libs_tree(self, libs):
+        self.libs_tree.delete(*self.libs_tree.get_children())
+        self.loaded_libraries = libs or []
+        for lib in self.loaded_libraries:
+            self.libs_tree.insert(
+                "",
+                tk.END,
+                text=lib.get("name", "?"),
+                values=(lib.get("version", ""), lib.get("sentence", "")[:40]),
+            )
+        self.log("Bibliotecas carregadas")
+
+    def _start_initial_loading(self):
+        startup_modal = self._show_startup_modal()
+
+        def load_thread():
+            error_msg = ""
+            boards = []
+            libs = []
+            ports = []
+            try:
+                boards = self.backend.list_boards()
+                libs = self.backend.list_libraries_fixed()
+                if not libs:
+                    libs = self.backend.list_libraries()
+                ports = self._get_serial_ports()
+            except Exception as e:
+                error_msg = str(e)
+
+            self.after(
+                0,
+                lambda: self._finish_initial_loading(startup_modal, boards, libs, ports, error_msg),
+            )
+
+        threading.Thread(target=load_thread, daemon=True).start()
+
+    def _finish_initial_loading(self, startup_modal, boards, libs, ports, error_msg):
+        self._close_startup_modal(startup_modal)
+        if error_msg:
+            self.log(f"[WARN] Falha no carregamento inicial: {error_msg}")
+
+        self.boards_cache = boards or []
+        self.boards_cache_time = time.time()
+        self._update_boards_tree(self.boards_cache)
+        self._populate_libs_tree(libs or [])
+        self.available_ports = ports or []
+        self.log(f"Portas: {', '.join(self.available_ports) if self.available_ports else 'nenhuma'}")
+
     def _load_initial_data(self):
-        self._load_boards()
-        self._load_libs()
-        self._serial_refresh_ports()
+        self._start_initial_loading()
     
     def log(self, text: str):
         if self.console is None:

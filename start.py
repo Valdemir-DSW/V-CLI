@@ -1,89 +1,88 @@
 """
-Script de Inicialização - V CLI
-Verifica tudo antes de abrir a aplicação
+Script de Inicializacao - V CLI
+Verifica tudo antes de abrir a aplicacao
 """
 
-import os
 import sys
+import ctypes
 import subprocess
+import importlib
 from pathlib import Path
+from tkinter import Tk, messagebox
+
+
+def _hide_console_window():
+    """Oculta o console no Windows para execucao silenciosa."""
+    if sys.platform != "win32":
+        return
+    try:
+        hwnd = ctypes.windll.kernel32.GetConsoleWindow()
+        if hwnd:
+            ctypes.windll.user32.ShowWindow(hwnd, 0)
+    except Exception:
+        pass
+
+
+def _show_error_dialog(title: str, message: str):
+    try:
+        root = Tk()
+        root.withdraw()
+        messagebox.showerror(title, message)
+        root.destroy()
+    except Exception:
+        pass
+
 
 def verify_and_start():
-    """Verifica ambiente e inicia V CLI"""
-    
-    base_dir = Path.cwd()
+    """Verifica ambiente e inicia V CLI."""
+    base_dir = Path(__file__).resolve().parent
     cli_path = base_dir / "arduino-cli.exe"
     config_file = base_dir / "cli.yaml"
     main_py = base_dir / "main.py"
-    
-    print("=" * 60)
-    print("V CLI - Inicialização")
-    print("=" * 60)
-    
-    # Verificação 1: arduino-cli
-    print("\n[1/4] Verificando arduino-cli...", end=" ")
+
     if not cli_path.exists():
-        print("ERRO")
-        print(f"\nArduino CLI não encontrado em: {cli_path}")
-        print("Baixe em: https://github.com/arduino/arduino-cli/releases")
-        print("e coloque na pasta do projeto.")
+        _show_error_dialog(
+            "V CLI",
+            (
+                f"Arduino CLI nao encontrado em:\n{cli_path}\n\n"
+                "Baixe em:\nhttps://github.com/arduino/arduino-cli/releases"
+            ),
+        )
         return False
-    print("OK")
-    
-    # Verificação 2: main.py
-    print("[2/4] Verificando arquivos Python...", end=" ")
+
     if not main_py.exists():
-        print("ERRO")
-        print(f"main.py não encontrado")
+        _show_error_dialog("V CLI", "Arquivo main.py nao encontrado.")
         return False
-    print("OK")
-    
-    # Verificação 3: Version check
-    print("[3/4] Testando arduino-cli...", end=" ")
+
     try:
         result = subprocess.run(
             [str(cli_path), "version"],
             capture_output=True,
             text=True,
-            timeout=10
+            timeout=10,
         )
         if result.returncode != 0:
-            print("ERRO")
-            print(f"Arduino CLI retornou erro: {result.stderr[:100]}")
-            print("\nTentando recuperar com reset_cli.py...")
+            msg = (result.stderr or result.stdout or "").strip()
+            _show_error_dialog("V CLI", f"Arduino CLI retornou erro:\n{msg[:300]}")
             return False
-        print("OK")
     except Exception as e:
-        print(f"ERRO: {e}")
+        _show_error_dialog("V CLI", f"Falha ao testar arduino-cli:\n{e}")
         return False
-    
-    # Verificação 4: Configuração
-    print("[4/4] Verificando configuração...", end=" ")
-    if not config_file.exists():
-        print("CRIAR")
-        print("        (será criada automaticamente ao iniciar)")
-    else:
-        print("OK")
-    
-    print("\n" + "=" * 60)
-    print("Iniciando V CLI...")
-    print("=" * 60 + "\n")
-    
-    # Iniciar aplicação
+
+    _ = config_file.exists()
+
     try:
-        subprocess.run([sys.executable, str(main_py)])
+        main_module = importlib.import_module("main")
+        app = main_module.VCliApp()
+        app.mainloop()
         return True
     except Exception as e:
-        print(f"Erro ao iniciar V CLI: {e}")
+        _show_error_dialog("V CLI", f"Erro ao iniciar aplicativo:\n{e}")
         return False
 
 
 if __name__ == "__main__":
+    _hide_console_window()
     success = verify_and_start()
-    
     if not success:
-        print("\nPara recuperar, execute:")
-        print("  python reset_cli.py")
-        print("\nPara mais informações, veja:")
-        print("  RECUPERACAO.md")
         sys.exit(1)

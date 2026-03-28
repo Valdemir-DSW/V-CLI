@@ -49,6 +49,8 @@
   "info.loading_boards": "Loading boards...",
   "boards.title": "Boards",
   "boards.updated_success": "Boards updated successfully",
+  "boards.zip_select_title": "Select board ZIP",
+  "boards.zip_added_success": "Board ZIP added successfully",
   "libs.title": "Library",
   "libs.path_not_found": "Could not locate library path",
   "error.title": "Error",
