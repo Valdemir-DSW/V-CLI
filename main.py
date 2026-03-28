@@ -1861,7 +1861,7 @@ class VCliApp(tk.Tk):
                 installed_map = {}
                 for core in installed_cores:
                     core_id = core.get("id", "")
-                    version = core.get("version", "")
+                    version = core.get("installed_version", "")
                     if core_id and version:
                         installed_map[core_id] = version
                 
@@ -2193,34 +2193,75 @@ class VCliApp(tk.Tk):
             append_log(self.t("mgr.loading", "Loading data..."))
 
             def worker():
+                # Carrega bibliotecas instaladas
+                installed_libs = self.backend.list_libraries_fixed()
+                installed_map = {}
+                for lib in installed_libs:
+                    lib_name = lib.get("name", "")
+                    version = lib.get("version", "")
+                    if lib_name and version:
+                        installed_map[lib_name] = version
+                
+                # Busca por bibliotecas (com limite/busca)
                 term = search_var.get().strip()
-                limit = 0 if term else 20
-                all_libs = [self._normalize_library_entry(x) for x in self.backend.search_libraries(term, limit=limit)]
-                installed = [self._normalize_library_entry(x) for x in self.backend.list_libraries_fixed()]
-                updates = [self._normalize_library_entry(x) for x in self.backend.list_library_updates()]
-                installed_map = {x.get("name", "").lower(): x for x in installed if x.get("name")}
-                updates_map = {x.get("name", "").lower(): x for x in updates if x.get("name")}
-
-                merged = []
-                for lib in all_libs:
-                    key = lib.get("name", "").lower()
-                    if key in installed_map:
-                        lib["version"] = installed_map[key].get("version", lib.get("version", ""))
-                    if key in updates_map:
-                        lib["latest_version"] = updates_map[key].get("latest_version", lib.get("latest_version", ""))
-                    if lib.get("name") and not lib.get("versions"):
-                        lib["versions"] = self.backend.get_library_versions(lib["name"])
-                    merged.append(lib)
-
-                for collection in (installed, updates):
-                    for lib in collection:
-                        if lib.get("name") and not lib.get("versions"):
-                            lib["versions"] = self.backend.get_library_versions(lib["name"])
-                        if not lib.get("latest_version") and lib.get("versions"):
-                            lib["latest_version"] = lib["versions"][0]
+                limit = 0 if term else 20  # Se buscar, sem limite; se não, mostra só 20
+                search_results = [self._normalize_library_entry(x) for x in self.backend.search_libraries(term, limit=limit)]
+                
+                # Para cada resultado de busca, carrega versões completas
+                libraries_by_name = {}
+                for lib in search_results:
+                    lib_name = lib.get("name", "")
+                    if lib_name:
+                        if lib_name not in libraries_by_name:
+                            libraries_by_name[lib_name] = {
+                                "name": lib_name,
+                                "versions": set(),
+                                "sentence": lib.get("sentence", ""),
+                                "url": lib.get("url", ""),
+                            }
+                        # Adicione a versão encontrada
+                        if lib.get("version"):
+                            libraries_by_name[lib_name]["versions"].add(lib.get("version"))
+                
+                # Carrega TODAS versões para bibliotecas instaladas (mesmo se não aparecem na busca)
+                all_library_entries = self.backend.list_libraries_all_versions()
+                for entry in all_library_entries:
+                    lib_name = entry.get("name", "")
+                    version = entry.get("version", "")
+                    if lib_name and version and lib_name in installed_map:
+                        # Se é biblioteca instalada, adiciona ao dicionário se não estiver lá
+                        if lib_name not in libraries_by_name:
+                            libraries_by_name[lib_name] = {
+                                "name": lib_name,
+                                "versions": set(),
+                                "sentence": entry.get("sentence", ""),
+                                "url": entry.get("url", ""),
+                            }
+                        libraries_by_name[lib_name]["versions"].add(version)
+                
+                # Converte para formato de lista para o gerenciador
+                all_libs = []
+                for lib_name, lib_data in libraries_by_name.items():
+                    versions_list = sorted(list(lib_data["versions"]), reverse=True)
+                    all_libs.append({
+                        "name": lib_name,
+                        "sentence": lib_data.get("sentence", ""),
+                        "url": lib_data.get("url", ""),
+                        "installed_version": installed_map.get(lib_name, ""),
+                        "latest_version": versions_list[0] if versions_list else "",
+                        "versions": versions_list,
+                    })
+                
+                installed = [x for x in all_libs if x.get("installed_version")]
+                updates = [
+                    x
+                    for x in installed
+                    if x.get("latest_version")
+                    and self._compare_versions(x.get("latest_version", ""), x.get("installed_version", "")) > 0
+                ]
 
                 def done():
-                    state["all"] = [x for x in merged if x.get("name")]
+                    state["all"] = [x for x in all_libs if x.get("name")]
                     state["installed"] = [x for x in installed if x.get("name")]
                     state["updates"] = [x for x in updates if x.get("name")]
                     render_cards()
