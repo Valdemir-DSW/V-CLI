@@ -1,2 +1,0 @@
-alice.name=MyBoard
-alice.build.board=ALICE

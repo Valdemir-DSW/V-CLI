@@ -1,4 +1,0 @@
-profiles:
-  garage:
-    fqbn: arduino:avr:uno
-default_profile: garage
