@@ -1838,7 +1838,45 @@ class VCliApp(tk.Tk):
             append_log(self.t("mgr.loading", "Loading data..."))
 
             def worker():
-                all_cores = [self._normalize_core_entry(x) for x in self.backend.search_cores("")]
+                # Busca TODAS as versões de placas (com histórico)
+                all_board_entries = self.backend.list_boards_all_versions()
+                
+                # Agrupa por plataforma_id e extrai versões únicas
+                platforms_by_id = {}
+                for entry in all_board_entries:
+                    platform_id = entry.get("platform_id", "")
+                    version = entry.get("platform_version", "")
+                    if platform_id and version:
+                        if platform_id not in platforms_by_id:
+                            platforms_by_id[platform_id] = {
+                                "id": platform_id,
+                                "name": entry.get("platform_id", platform_id),
+                                "versions": set(),
+                                "installed_version": "",
+                            }
+                        platforms_by_id[platform_id]["versions"].add(version)
+                
+                # Detecta versões instaladas
+                installed_cores = self.backend.list_installed_cores()
+                installed_map = {}
+                for core in installed_cores:
+                    core_id = core.get("id", "")
+                    version = core.get("version", "")
+                    if core_id and version:
+                        installed_map[core_id] = version
+                
+                # Converte para formato de lista para o gerenciador
+                all_cores = []
+                for platform_id, plat_data in platforms_by_id.items():
+                    versions_list = sorted(list(plat_data["versions"]), reverse=True)
+                    all_cores.append({
+                        "id": platform_id,
+                        "name": platform_id,
+                        "installed_version": installed_map.get(platform_id, ""),
+                        "latest_version": versions_list[0] if versions_list else "",
+                        "versions": versions_list,
+                    })
+                
                 installed = [x for x in all_cores if x.get("installed_version")]
                 updates = [
                     x
