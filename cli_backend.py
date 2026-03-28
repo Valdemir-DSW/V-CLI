@@ -43,7 +43,11 @@ class CLIBackend:
         self.base_dir = Path(base_dir)
         self.projects_dir = self.base_dir / "projects"
         self.cli_path = self.base_dir / "arduino-cli.exe"
-        self.config_file = self.base_dir / "cli.yaml"
+        appdata_local = Path(os.getenv("LOCALAPPDATA") or (Path.home() / "AppData" / "Local"))
+        self.arduino15_dir = appdata_local / "Arduino15"
+        self.vcli_data_dir = self.arduino15_dir / "V-CLI"
+        self.vcli_data_dir.mkdir(parents=True, exist_ok=True)
+        self.config_file = self.vcli_data_dir / "cli.yaml"
         self.config_callback = config_callback or (lambda x: None)
         self._process_lock = threading.Lock()
         self._current_process: Optional[subprocess.Popen] = None
@@ -70,16 +74,34 @@ class CLIBackend:
     
     def _init_cli(self):
         """Inicializa configuração do CLI"""
-        # Sempre recria para garantir consistência
-        if self.config_file.exists():
-            try:
-                self.config_file.unlink()
-                self.log("Configuração anterior removida")
-            except Exception as e:
-                self.log(f"Aviso ao remover config: {e}")
-        
-        self.log("Inicializando arduino-cli...")
-        self.run_cli_sync(["config", "init", "--config-file", str(self.config_file)])
+        if not self.config_file.exists():
+            self.log("Inicializando arduino-cli...")
+            self.run_cli_sync(["config", "init", "--config-file", str(self.config_file)])
+            if not self.config_file.exists():
+                try:
+                    self._run_subprocess(
+                        [str(self.cli_path), "config", "init", "--dest-file", str(self.config_file)],
+                        timeout=60,
+                    )
+                except Exception:
+                    pass
+        self._ensure_default_indexes()
+
+    def _ensure_default_indexes(self):
+        """Garante URLs padrão úteis no Board Manager."""
+        default_urls = [
+            "https://espressif.github.io/arduino-esp32/package_esp32_index.json",
+            "https://github.com/stm32duino/BoardManagerFiles/raw/main/package_stmicroelectronics_index.json",
+        ]
+        current_urls = self.get_additional_board_urls()
+        for url in default_urls:
+            if url in current_urls:
+                continue
+            out, success, err = self.add_board_json_sync(url)
+            if success:
+                self.log(f"[OK] URL padrão registrada: {url}")
+            else:
+                self.log(f"[AVISO] Falha ao registrar URL padrão '{url}': {err or out[:150]}")
 
     def _parse_cli_json(self, output: str) -> Optional[Any]:
         """Tenta extrair o primeiro JSON válido ignorando texto extra"""
@@ -760,7 +782,7 @@ void loop() {
         if zip_file.suffix.lower() != ".zip":
             return ("", False, "Arquivo selecionado nao e um ZIP")
 
-        extracted_root = self.base_dir / "board_indexes"
+        extracted_root = self.vcli_data_dir / "board_indexes"
         extracted_root.mkdir(parents=True, exist_ok=True)
         extracted_dir = extracted_root / f"{zip_file.stem}_{int(time.time())}"
 
@@ -799,6 +821,149 @@ void loop() {
 
         self.log(f"Indice local de placas registrado: {index_file}")
         return (output_total, True, "")
+
+    def get_additional_board_urls(self) -> list:
+        """Lista URLs configuradas em board_manager.additional_urls."""
+        output = self.run_cli_sync(["config", "dump", "--format", "json"])
+        data = self._parse_cli_json(output)
+        if not isinstance(data, dict):
+            return []
+        manager = data.get("board_manager", {})
+        urls = manager.get("additional_urls", [])
+        if isinstance(urls, list):
+            return [str(u).strip() for u in urls if str(u).strip()]
+        if isinstance(urls, str) and urls.strip():
+            return [urls.strip()]
+        return []
+
+    def remove_board_json_sync(self, url: str) -> tuple:
+        """Remove URL de JSON adicional de placas."""
+        if not url:
+            return ("", False, "URL invalida")
+        cmd = [
+            str(self.cli_path),
+            "--config-file",
+            str(self.config_file),
+            "config",
+            "delete",
+            "board_manager.additional_urls",
+            url,
+        ]
+        out, ok, err = self._run_action_command(cmd, timeout=60)
+        if not ok:
+            return (out, False, err)
+        out2 = self.run_cli_sync(["core", "update-index"])
+        return (out + out2, True, "")
+
+    @staticmethod
+    def _normalize_version(version: str) -> list:
+        clean = str(version or "").strip()
+        if not clean:
+            return [0]
+        parts = []
+        for token in clean.replace("-", ".").split("."):
+            num = "".join(ch for ch in token if ch.isdigit())
+            parts.append(int(num) if num else 0)
+        return parts or [0]
+
+    @classmethod
+    def _is_newer_version(cls, candidate: str, current: str) -> bool:
+        return cls._normalize_version(candidate) > cls._normalize_version(current)
+
+    def search_cores(self, term: str = "") -> list:
+        args = ["core", "search", "--format", "json"]
+        if term.strip():
+            args.insert(2, term.strip())
+        output = self.run_cli_sync(args)
+        data = self._parse_cli_json(output)
+        if isinstance(data, dict):
+            if isinstance(data.get("platforms"), list):
+                return data.get("platforms", [])
+            if isinstance(data.get("search_result"), list):
+                return data.get("search_result", [])
+        if isinstance(data, list):
+            return data
+        return []
+
+    def list_installed_cores(self) -> list:
+        output = self.run_cli_sync(["core", "list", "--format", "json"])
+        data = self._parse_cli_json(output)
+        if isinstance(data, dict):
+            if isinstance(data.get("installed_platforms"), list):
+                return data.get("installed_platforms", [])
+            if isinstance(data.get("platforms"), list):
+                return data.get("platforms", [])
+        if isinstance(data, list):
+            return data
+        return []
+
+    def list_core_updates(self) -> list:
+        installed = self.list_installed_cores()
+        all_cores = self.search_cores()
+        latest_by_id = {}
+        for core in all_cores:
+            core_id = str(core.get("id") or "").strip()
+            if core_id:
+                latest_by_id[core_id] = core
+
+        updates = []
+        for core in installed:
+            installed_obj = core.get("installed") if isinstance(core.get("installed"), dict) else {}
+            core_id = str(core.get("id") or installed_obj.get("id") or "").strip()
+            current_version = str(
+                core.get("installed_version")
+                or core.get("version")
+                or installed_obj.get("version")
+                or ""
+            ).strip()
+            latest = latest_by_id.get(core_id, {})
+            latest_version = str(latest.get("latest_version") or latest.get("version") or "").strip()
+            if core_id and current_version and latest_version and self._is_newer_version(latest_version, current_version):
+                updates.append(
+                    {
+                        "id": core_id,
+                        "name": latest.get("name") or core.get("name") or core_id,
+                        "installed_version": current_version,
+                        "latest_version": latest_version,
+                    }
+                )
+        return updates
+
+    def install_core_sync(self, core_id: str, version: str = "") -> tuple:
+        if not core_id:
+            return ("", False, "ID da plataforma invalido")
+        target = f"{core_id}@{version.strip()}" if version and version.strip() else core_id.strip()
+        cmd = [str(self.cli_path), "--config-file", str(self.config_file), "core", "install", target]
+        return self._run_action_command(cmd, timeout=600)
+
+    def upgrade_core_sync(self, core_id: str) -> tuple:
+        if not core_id:
+            return ("", False, "ID da plataforma invalido")
+        cmd = [str(self.cli_path), "--config-file", str(self.config_file), "core", "upgrade", core_id.strip()]
+        return self._run_action_command(cmd, timeout=600)
+
+    def get_core_versions(self, core_id: str) -> list:
+        core_id = str(core_id or "").strip()
+        if not core_id:
+            return []
+        for item in self.search_cores():
+            if str(item.get("id") or "").strip() != core_id:
+                continue
+            releases = item.get("releases", [])
+            if isinstance(releases, list):
+                versions = []
+                for rel in releases:
+                    if isinstance(rel, dict):
+                        ver = rel.get("version")
+                    else:
+                        ver = rel
+                    if ver:
+                        versions.append(str(ver))
+                if versions:
+                    return versions
+            latest = item.get("latest_version") or item.get("version")
+            return [str(latest)] if latest else []
+        return []
     
     # ==================== BIBLIOTECAS ====================
     
@@ -943,18 +1108,42 @@ void loop() {
             self.log("[INFO] Nenhuma biblioteca encontrada")
         return normalized
 
-    def install_library_zip(self, zip_path: str):
-        """Instala biblioteca de arquivo ZIP"""
+    def install_library_zip_sync(self, zip_path: str) -> tuple:
+        """Instala biblioteca de arquivo ZIP com retorno detalhado."""
+        if not zip_path:
+            return ("", False, "Caminho do ZIP inválido")
         if not os.path.exists(zip_path):
-            self.log(f"Erro: Arquivo não encontrado: {zip_path}")
-            return
-        self.run_cli_async(["lib", "install", str(zip_path)])
-    
-    def install_library(self, library_name: str):
-        """Instala biblioteca pelo nome"""
+            return ("", False, f"Arquivo não encontrado: {zip_path}")
+        if Path(zip_path).suffix.lower() != ".zip":
+            return ("", False, "Arquivo selecionado não é um ZIP")
+        cmd = [str(self.cli_path), "--config-file", str(self.config_file), "lib", "install", str(zip_path)]
+        return self._run_action_command(cmd, timeout=300)
+
+    def install_library_sync(self, library_name: str, version: str = "") -> tuple:
+        """Instala biblioteca pelo nome, opcionalmente em versão específica."""
         if not library_name:
-            return
-        self.run_cli_async(["lib", "install", library_name])
+            return ("", False, "Nome da biblioteca inválido")
+        target = library_name.strip()
+        if version and version.strip():
+            target = f"{target}@{version.strip()}"
+        cmd = [str(self.cli_path), "--config-file", str(self.config_file), "lib", "install", target]
+        return self._run_action_command(cmd, timeout=300)
+
+    def install_library_zip(self, zip_path: str):
+        """Compat: mantém API antiga assíncrona."""
+        def task():
+            out, ok, err = self.install_library_zip_sync(zip_path)
+            if not ok:
+                self.log(f"[ERRO] Instalação ZIP falhou: {err or out[:180]}")
+        threading.Thread(target=task, daemon=True).start()
+
+    def install_library(self, library_name: str):
+        """Compat: mantém API antiga assíncrona."""
+        def task():
+            out, ok, err = self.install_library_sync(library_name)
+            if not ok:
+                self.log(f"[ERRO] Instalação de biblioteca falhou: {err or out[:180]}")
+        threading.Thread(target=task, daemon=True).start()
 
     def uninstall_library(self, library_name: str) -> tuple:
         """Remove biblioteca pelo nome e retorna (output, success, error_message)."""
@@ -962,6 +1151,63 @@ void loop() {
             return ("", False, "Nome de biblioteca invalido")
         cmd = [str(self.cli_path), "--config-file", str(self.config_file), "lib", "uninstall", str(library_name)]
         return self._run_action_command(cmd, timeout=120)
+
+    def search_libraries(self, term: str = "") -> list:
+        args = ["lib", "search", "--format", "json"]
+        if term.strip():
+            args.insert(2, term.strip())
+        output = self.run_cli_sync(args)
+        data = self._parse_cli_json(output)
+        if isinstance(data, dict):
+            if isinstance(data.get("libraries"), list):
+                return data.get("libraries", [])
+            if isinstance(data.get("search_result"), list):
+                return data.get("search_result", [])
+        if isinstance(data, list):
+            return data
+        return []
+
+    def get_library_versions(self, library_name: str) -> list:
+        name = str(library_name or "").strip().lower()
+        if not name:
+            return []
+        for lib in self.search_libraries():
+            candidate_name = str(lib.get("name") or lib.get("title") or "").strip().lower()
+            if candidate_name != name:
+                continue
+            releases = lib.get("releases", [])
+            if isinstance(releases, list):
+                versions = []
+                for rel in releases:
+                    if isinstance(rel, dict):
+                        ver = rel.get("version")
+                    else:
+                        ver = rel
+                    if ver:
+                        versions.append(str(ver))
+                if versions:
+                    return versions
+            latest = lib.get("latest") or lib.get("latest_version") or lib.get("version")
+            return [str(latest)] if latest else []
+        return []
+
+    def list_library_updates(self) -> list:
+        output = self.run_cli_sync(["lib", "outdated", "--format", "json"])
+        data = self._parse_cli_json(output)
+        if isinstance(data, dict):
+            if isinstance(data.get("libraries"), list):
+                return data.get("libraries", [])
+            if isinstance(data.get("outdated_libraries"), list):
+                return data.get("outdated_libraries", [])
+        if isinstance(data, list):
+            return data
+        return []
+
+    def upgrade_library_sync(self, library_name: str) -> tuple:
+        if not library_name:
+            return ("", False, "Nome da biblioteca inválido")
+        cmd = [str(self.cli_path), "--config-file", str(self.config_file), "lib", "upgrade", library_name.strip()]
+        return self._run_action_command(cmd, timeout=300)
 
     def find_library_path(self, library_name: str) -> Optional[Path]:
         """Tenta localizar o caminho de uma biblioteca instalada."""
@@ -977,7 +1223,8 @@ void loop() {
                         return p
 
         candidates = [
-            self.base_dir / "libraries" / library_name,
+            self.vcli_data_dir / "libraries" / library_name,
+            self.arduino15_dir / "libraries" / library_name,
             Path.home() / "Documents" / "Arduino" / "libraries" / library_name,
         ]
         for candidate in candidates:

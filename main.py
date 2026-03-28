@@ -15,6 +15,8 @@ import time
 import locale
 from datetime import datetime
 import re
+from typing import Optional
+import webbrowser
 
 
 class VCliApp(tk.Tk):
@@ -39,8 +41,13 @@ class VCliApp(tk.Tk):
         self.serial_tx_log = []
         self.available_ports = []
         self.baud_options = ["9600", "19200", "38400", "57600", "115200"]
-        self.recent_projects_file = Path.cwd() / ".recent_projects.json"
+        appdata_local = Path(os.getenv("LOCALAPPDATA") or (Path.home() / "AppData" / "Local"))
+        self.appdata_dir = appdata_local / "Arduino15" / "V-CLI"
+        self.appdata_dir.mkdir(parents=True, exist_ok=True)
+        self.recent_projects_file = self.appdata_dir / "recent_projects.json"
+        self.app_settings_file = self.appdata_dir / "settings.json"
         self.app_icon_path = Path.cwd() / ".ico"
+        self.app_settings = self._load_app_settings()
         
         # Cache de placas para não recarregar toda hora
         self.boards_cache = None
@@ -101,9 +108,8 @@ class VCliApp(tk.Tk):
         left_frame = ttk.Frame(main_frame, width=130)
         main_frame.add(left_frame)
         
-        ttk.Label(left_frame, text=self.t("nav.new_open", "NEW/OPEN"), font=("Arial", 8, "bold")).pack(anchor="w")
         btn_f = ttk.Frame(left_frame)
-        btn_f.pack(fill=tk.X, pady=2)
+        btn_f.pack(fill=tk.X, pady=(2, 4))
         ttk.Button(btn_f, text=self.t("btn.new", "New"), command=self._create_project, width=6).pack(side=tk.LEFT, padx=1)
         ttk.Button(btn_f, text=self.t("btn.open", "Open"), command=self._open_project, width=6).pack(side=tk.LEFT, padx=1)
         
@@ -182,22 +188,24 @@ class VCliApp(tk.Tk):
         # Painel de Configurações (sem canvas, sem splits)
         config_frame = ttk.LabelFrame(tab, text=self.t("cfg.project_and_settings", "Project and Settings"), padding=8)
         config_frame.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
-        
+
+        def build_setting_row(parent, label_text: str):
+            row = ttk.Frame(parent)
+            row.pack(fill=tk.X, pady=4)
+            row.grid_columnconfigure(0, weight=1, uniform="cfg")
+            row.grid_columnconfigure(1, weight=1, uniform="cfg")
+            ttk.Label(row, text=label_text, font=("Arial", 9, "bold")).grid(row=0, column=0, sticky="w", padx=(5, 8))
+            return row
+
         # ===== NOME DO PROJETO =====
-        nome_row = ttk.Frame(config_frame)
-        nome_row.pack(fill=tk.X, pady=5)
-        
-        ttk.Label(nome_row, text=self.t("cfg.name", "Name:"), font=("Arial", 9, "bold"), width=15).pack(side=tk.LEFT, padx=5)
-        self.code_project_name = tk.Label(nome_row, text="...", font=("Courier", 9), fg="#333333", bg="#f5f5f5")
-        self.code_project_name.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
-        ttk.Button(nome_row, text="...", width=3, command=self._edit_project_name).pack(side=tk.LEFT, padx=2)
-        ttk.Button(nome_row, text=self.t("btn.properties", "Properties"), width=12, command=self._edit_project_properties).pack(side=tk.LEFT, padx=2)
-        
+        nome_row = build_setting_row(config_frame, self.t("cfg.name", "Name:"))
+        self.code_project_name = tk.Label(nome_row, text="...", font=("Courier", 9), fg="#333333", bg="#f5f5f5", anchor="w")
+        self.code_project_name.grid(row=0, column=1, sticky="ew", padx=(0, 5))
+        ttk.Button(nome_row, text="...", width=3, command=self._edit_project_name).grid(row=0, column=2, padx=2)
+        ttk.Button(nome_row, text=self.t("btn.properties", "Properties"), width=12, command=self._edit_project_properties).grid(row=0, column=3, padx=(2, 5))
+
         # ===== PLACA =====
-        placa_row = ttk.Frame(config_frame)
-        placa_row.pack(fill=tk.X, pady=5)
-        
-        ttk.Label(placa_row, text=self.t("cfg.board", "Board:"), font=("Arial", 9, "bold"), width=15).pack(side=tk.LEFT, padx=5)
+        placa_row = build_setting_row(config_frame, self.t("cfg.board", "Board:"))
         self.settings_board_var = tk.StringVar(value="")
         self.settings_board_display = tk.Label(
             placa_row,
@@ -207,17 +215,13 @@ class VCliApp(tk.Tk):
             bd=1,
             padx=4,
             pady=2,
-            width=30,
             anchor="w"
         )
-        self.settings_board_display.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
-        ttk.Button(placa_row, text="...", width=3, command=self._open_boards_dialog).pack(side=tk.LEFT, padx=2)
-        
+        self.settings_board_display.grid(row=0, column=1, sticky="ew", padx=(0, 5))
+        ttk.Button(placa_row, text="...", width=3, command=self._open_boards_dialog).grid(row=0, column=2, padx=(2, 5))
+
         # ===== PORTA SERIAL =====
-        port_row = ttk.Frame(config_frame)
-        port_row.pack(fill=tk.X, pady=5)
-        
-        ttk.Label(port_row, text=self.t("cfg.port_label", "Serial Port:"), font=("Arial", 9, "bold"), width=15).pack(side=tk.LEFT, padx=5)
+        port_row = build_setting_row(config_frame, self.t("cfg.port_label", "Serial Port:"))
         self.settings_port_var = tk.StringVar(value="auto")
         self.settings_port_display = tk.Label(
             port_row,
@@ -227,17 +231,13 @@ class VCliApp(tk.Tk):
             bd=1,
             padx=4,
             pady=2,
-            width=30,
             anchor="w"
         )
-        self.settings_port_display.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
-        ttk.Button(port_row, text="...", width=3, command=self._open_port_modal).pack(side=tk.LEFT, padx=2)
-        
+        self.settings_port_display.grid(row=0, column=1, sticky="ew", padx=(0, 5))
+        ttk.Button(port_row, text="...", width=3, command=self._open_port_modal).grid(row=0, column=2, padx=(2, 5))
+
         # ===== BAUDRATE =====
-        baud_row = ttk.Frame(config_frame)
-        baud_row.pack(fill=tk.X, pady=5)
-        
-        ttk.Label(baud_row, text=self.t("cfg.baud_label", "Baud rate (bps):"), font=("Arial", 9, "bold"), width=15).pack(side=tk.LEFT, padx=5)
+        baud_row = build_setting_row(config_frame, self.t("cfg.baud_label", "Baud rate (bps):"))
         self.settings_baud_var = tk.StringVar(value="115200")
         self.settings_baud_display = tk.Label(
             baud_row,
@@ -247,11 +247,10 @@ class VCliApp(tk.Tk):
             bd=1,
             padx=4,
             pady=2,
-            width=30,
             anchor="w"
         )
-        self.settings_baud_display.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
-        ttk.Button(baud_row, text="...", width=3, command=self._open_baud_modal).pack(side=tk.LEFT, padx=2)
+        self.settings_baud_display.grid(row=0, column=1, sticky="ew", padx=(0, 5))
+        ttk.Button(baud_row, text="...", width=3, command=self._open_baud_modal).grid(row=0, column=2, padx=(2, 5))
         
         # Divisor visual
         ttk.Separator(config_frame, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=8)
@@ -423,8 +422,8 @@ class VCliApp(tk.Tk):
         bframe = ttk.Frame(tab)
         bframe.pack(fill=tk.X, padx=2, pady=2)
         ttk.Button(bframe, text="Atualizar", command=self._load_boards).pack(side=tk.LEFT, padx=1, expand=True, fill=tk.X)
-        ttk.Button(bframe, text="Adicionar JSON", command=self._add_board_json).pack(side=tk.LEFT, padx=1, expand=True, fill=tk.X)
         ttk.Button(bframe, text="Adicionar ZIP", command=self._add_board_zip).pack(side=tk.LEFT, padx=1, expand=True, fill=tk.X)
+        ttk.Button(bframe, text="Gerenciador", command=self._open_board_manager).pack(side=tk.LEFT, padx=1, expand=True, fill=tk.X)
         
         cols = ("FQBN",)
         self.boards_tree = ttk.Treeview(tab, columns=cols, height=15)
@@ -445,6 +444,7 @@ class VCliApp(tk.Tk):
         ttk.Button(bframe, text="Atualizar", command=self._load_libs).pack(side=tk.LEFT, padx=1, expand=True, fill=tk.X)
         ttk.Button(bframe, text="ZIP", command=self._install_lib_zip).pack(side=tk.LEFT, padx=1, expand=True, fill=tk.X)
         ttk.Button(bframe, text="Buscar", command=self._search_lib).pack(side=tk.LEFT, padx=1, expand=True, fill=tk.X)
+        ttk.Button(bframe, text="Gerenciador", command=self._open_library_manager).pack(side=tk.LEFT, padx=1, expand=True, fill=tk.X)
         
         cols = ("Versão", "Descrição")
         self.libs_tree = ttk.Treeview(tab, columns=cols, height=15)
@@ -499,6 +499,31 @@ class VCliApp(tk.Tk):
         ttk.Button(inp, text=">>", command=self._serial_send, width=3).pack(side=tk.LEFT)
 
     # HISTÓRICO
+    def _load_app_settings(self) -> dict:
+        try:
+            if self.app_settings_file.exists():
+                with open(self.app_settings_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if isinstance(data, dict):
+                        return data
+        except Exception:
+            pass
+        return {}
+
+    def _save_app_settings(self):
+        try:
+            with open(self.app_settings_file, "w", encoding="utf-8") as f:
+                json.dump(self.app_settings, f, ensure_ascii=False, indent=2)
+        except Exception as exc:
+            self.log(f"[AVISO] Falha ao salvar settings: {exc}")
+
+    def _get_aux_library_repo(self) -> str:
+        return str(self.app_settings.get("aux_library_repo", "")).strip()
+
+    def _set_aux_library_repo(self, value: str):
+        self.app_settings["aux_library_repo"] = (value or "").strip()
+        self._save_app_settings()
+
     def _load_recent_projects(self):
         try:
             if self.recent_projects_file.exists():
@@ -1195,7 +1220,546 @@ class VCliApp(tk.Tk):
             self._load_boards()
 
         threading.Thread(target=zip_thread, daemon=True).start()
-    
+
+    def _normalize_core_entry(self, raw: dict) -> dict:
+        if not isinstance(raw, dict):
+            return {"id": "", "name": "", "installed_version": "", "latest_version": "", "url": "", "versions": []}
+        installed_obj = raw.get("installed") if isinstance(raw.get("installed"), dict) else {}
+        releases = raw.get("releases", [])
+        versions = []
+        if isinstance(releases, list):
+            for rel in releases:
+                version_value = rel.get("version") if isinstance(rel, dict) else rel
+                if version_value:
+                    versions.append(str(version_value))
+        latest = str(raw.get("latest_version") or raw.get("latest") or raw.get("version") or "").strip()
+        if latest and latest not in versions:
+            versions.insert(0, latest)
+        return {
+            "id": str(raw.get("id") or raw.get("platform") or "").strip(),
+            "name": str(raw.get("name") or raw.get("platform_name") or raw.get("id") or "").strip(),
+            "installed_version": str(raw.get("installed_version") or raw.get("version") or installed_obj.get("version") or "").strip(),
+            "latest_version": latest,
+            "url": str(raw.get("website") or raw.get("url") or raw.get("website_url") or "").strip(),
+            "versions": versions,
+        }
+
+    def _normalize_library_entry(self, raw: dict) -> dict:
+        if not isinstance(raw, dict):
+            return {"name": "", "version": "", "latest_version": "", "sentence": "", "url": "", "versions": []}
+        lib_obj = raw.get("library") if isinstance(raw.get("library"), dict) else raw
+        inst_obj = raw.get("installed") if isinstance(raw.get("installed"), dict) else {}
+        rel_obj = raw.get("release") if isinstance(raw.get("release"), dict) else {}
+        releases = lib_obj.get("releases") if isinstance(lib_obj.get("releases"), list) else raw.get("releases", [])
+        versions = []
+        if isinstance(releases, list):
+            for rel in releases:
+                version_value = rel.get("version") if isinstance(rel, dict) else rel
+                if version_value:
+                    versions.append(str(version_value))
+        latest_version = str(raw.get("latest_version") or rel_obj.get("version") or raw.get("latest") or "").strip()
+        if latest_version and latest_version not in versions:
+            versions.insert(0, latest_version)
+        return {
+            "name": str(lib_obj.get("name") or lib_obj.get("title") or raw.get("name") or "").strip(),
+            "version": str(inst_obj.get("version") or lib_obj.get("version") or raw.get("version") or "").strip(),
+            "latest_version": latest_version,
+            "sentence": str(lib_obj.get("sentence") or lib_obj.get("paragraph") or lib_obj.get("description") or raw.get("sentence") or "").strip(),
+            "url": str(lib_obj.get("website") or lib_obj.get("url") or raw.get("url") or "").strip(),
+            "versions": versions,
+        }
+
+    def _open_board_manager(self):
+        dialog = tk.Toplevel(self)
+        self._apply_window_icon(dialog)
+        dialog.title(self.t("mgr.board.title", "Board Manager"))
+        dialog.geometry("980x640")
+        dialog.transient(self)
+        dialog.grab_set()
+
+        state = {"all": [], "installed": [], "updates": [], "urls": []}
+        runtime = {"busy": False}
+
+        notebook = ttk.Notebook(dialog)
+        notebook.pack(fill=tk.BOTH, expand=True, padx=8, pady=(8, 4))
+        manager_tab = ttk.Frame(notebook)
+        aux_tab = ttk.Frame(notebook)
+        notebook.add(manager_tab, text=self.t("mgr.tab.manager", "Manager"))
+        notebook.add(aux_tab, text=self.t("mgr.tab.aux", "Auxiliary Settings"))
+
+        top = ttk.Frame(manager_tab, padding=8)
+        top.pack(fill=tk.X)
+        ttk.Label(top, text=self.t("mgr.search", "Search:")).pack(side=tk.LEFT)
+        search_var = tk.StringVar(value="")
+        ttk.Entry(top, textvariable=search_var, width=36).pack(side=tk.LEFT, padx=6)
+        ttk.Label(top, text=self.t("mgr.filter", "Filter:")).pack(side=tk.LEFT, padx=(8, 2))
+
+        filter_map = {
+            "updates": self.t("mgr.filter.updates", "Pending updates"),
+            "installed": self.t("mgr.filter.installed", "Installed"),
+            "all": self.t("mgr.filter.all", "All"),
+        }
+        filter_combo = ttk.Combobox(top, state="readonly", width=22, values=list(filter_map.values()))
+        filter_combo.current(0)
+        filter_combo.pack(side=tk.LEFT, padx=4)
+
+        cards_host = ttk.Frame(manager_tab)
+        cards_host.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 6))
+        cards_canvas = tk.Canvas(cards_host, highlightthickness=0)
+        cards_scroll = ttk.Scrollbar(cards_host, orient="vertical", command=cards_canvas.yview)
+        cards_frame = ttk.Frame(cards_canvas)
+        cards_window = cards_canvas.create_window((0, 0), window=cards_frame, anchor="nw")
+        cards_canvas.configure(yscrollcommand=cards_scroll.set)
+        cards_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        cards_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        cards_frame.bind("<Configure>", lambda e: cards_canvas.configure(scrollregion=cards_canvas.bbox("all")))
+        cards_canvas.bind("<Configure>", lambda e: cards_canvas.itemconfigure(cards_window, width=e.width))
+
+        aux_main = ttk.Frame(aux_tab, padding=10)
+        aux_main.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(aux_main, text=self.t("mgr.board.json_urls", "Board JSON URLs"), font=("Arial", 10, "bold")).pack(anchor="w")
+        urls_list = tk.Listbox(aux_main, height=10)
+        urls_list.pack(fill=tk.BOTH, expand=True, pady=(6, 8))
+        urls_btns = ttk.Frame(aux_main)
+        urls_btns.pack(fill=tk.X)
+        ttk.Label(aux_main, text=self.t("mgr.board.default_info", "Default URLs include ESP32 and STM32 indexes.")).pack(anchor="w", pady=(8, 0))
+
+        footer = ttk.Frame(dialog, padding=(8, 2, 8, 8))
+        footer.pack(fill=tk.X)
+        progress = ttk.Progressbar(footer, mode="indeterminate")
+        progress.pack(fill=tk.X)
+        log_box = scrolledtext.ScrolledText(footer, height=4, font=("Courier", 8))
+        log_box.pack(fill=tk.X, pady=(4, 0))
+        log_box.config(state=tk.DISABLED)
+
+        def append_log(text):
+            log_box.config(state=tk.NORMAL)
+            log_box.insert(tk.END, f"{text}\n")
+            log_box.see(tk.END)
+            log_box.config(state=tk.DISABLED)
+
+        def set_busy(flag):
+            runtime["busy"] = flag
+            if flag:
+                progress.start(10)
+            else:
+                progress.stop()
+
+        def on_close():
+            if runtime["busy"]:
+                messagebox.showinfo(self.t("info.title", "Info"), self.t("mgr.busy_wait", "Wait for the current action to finish."))
+                return
+            dialog.destroy()
+
+        dialog.protocol("WM_DELETE_WINDOW", on_close)
+
+        def selected_filter():
+            label = filter_combo.get()
+            for code, display in filter_map.items():
+                if display == label:
+                    return code
+            return "updates"
+
+        def render_cards():
+            for w in cards_frame.winfo_children():
+                w.destroy()
+
+            if selected_filter() == "installed":
+                items = state["installed"]
+            elif selected_filter() == "all":
+                items = state["all"]
+            else:
+                items = state["updates"]
+
+            term = search_var.get().strip().lower()
+            for core in items:
+                core_id = core.get("id", "")
+                name = core.get("name", core_id)
+                if term and term not in f"{name} {core_id}".lower():
+                    continue
+
+                installed_v = core.get("installed_version", "")
+                latest_v = core.get("latest_version", "")
+                versions = list(core.get("versions", []))
+                if latest_v and latest_v not in versions:
+                    versions.insert(0, latest_v)
+                if installed_v and installed_v not in versions:
+                    versions.append(installed_v)
+                if not versions:
+                    versions = [latest_v or installed_v or ""]
+
+                has_install = not bool(installed_v)
+                has_update = bool(installed_v and latest_v and installed_v != latest_v)
+                default_version = latest_v if (has_install or has_update) else (installed_v or latest_v)
+
+                card = ttk.LabelFrame(cards_frame, text=name, padding=8)
+                card.pack(fill=tk.X, pady=4)
+                ttk.Label(card, text=f"ID: {core_id}", font=("Courier", 8)).pack(anchor="w")
+                ttk.Label(card, text=f"{self.t('mgr.installed', 'Installed')}: {installed_v or '-'}").pack(anchor="w")
+                ttk.Label(card, text=f"{self.t('mgr.latest', 'Latest')}: {latest_v or '-'}").pack(anchor="w")
+
+                if core.get("url"):
+                    url = core["url"]
+                    link = tk.Label(card, text=url, fg="#0066cc", cursor="hand2")
+                    link.pack(anchor="w")
+                    link.bind("<Button-1>", lambda e, u=url: webbrowser.open(u))
+
+                row = ttk.Frame(card)
+                row.pack(fill=tk.X, pady=(6, 0))
+                ttk.Label(row, text=self.t("mgr.version", "Version:")).pack(side=tk.LEFT)
+                version_var = tk.StringVar(value=default_version or versions[0])
+                ttk.Combobox(row, state="readonly", width=24, textvariable=version_var, values=versions).pack(side=tk.LEFT, padx=6)
+
+                if has_install:
+                    action_text = self.t("mgr.install", "Install")
+                elif has_update:
+                    action_text = self.t("mgr.update", "Update")
+                else:
+                    action_text = self.t("mgr.installed_state", "Installed")
+
+                def make_action(cid=core_id, nm=name, install=has_install, update=has_update, vv=version_var):
+                    def run_action():
+                        if runtime["busy"]:
+                            return
+                        version = (vv.get() or "").strip()
+                        set_busy(True)
+                        append_log(f"{action_text}: {nm} {version}")
+
+                        def worker():
+                            if install:
+                                out, ok, err = self.backend.install_core_sync(cid, version)
+                            elif update:
+                                out, ok, err = self.backend.install_core_sync(cid, version) if version else self.backend.upgrade_core_sync(cid)
+                            else:
+                                out, ok, err = ("", True, "")
+
+                            def done():
+                                set_busy(False)
+                                if ok:
+                                    append_log(self.t("mgr.action_ok", "Done."))
+                                    refresh_data()
+                                    self._load_boards()
+                                else:
+                                    append_log(f"{self.t('error.title', 'Error')}: {err}")
+                                    self._show_error_modal(self.t("mgr.board.title", "Board Manager"), err, out)
+
+                            self.after(0, done)
+
+                        threading.Thread(target=worker, daemon=True).start()
+                    return run_action
+
+                btn = ttk.Button(row, text=action_text, command=make_action())
+                btn.pack(side=tk.LEFT, padx=6)
+                if not (has_install or has_update):
+                    btn.state(["disabled"])
+
+        def refresh_data():
+            if runtime["busy"]:
+                return
+            set_busy(True)
+            append_log(self.t("mgr.loading", "Loading data..."))
+
+            def worker():
+                all_cores = [self._normalize_core_entry(x) for x in self.backend.search_cores("")]
+                installed = [self._normalize_core_entry(x) for x in self.backend.list_installed_cores()]
+                updates = [self._normalize_core_entry(x) for x in self.backend.list_core_updates()]
+                for core in all_cores:
+                    if core.get("id") and not core.get("versions"):
+                        core["versions"] = self.backend.get_core_versions(core["id"])
+                urls = self.backend.get_additional_board_urls()
+
+                def done():
+                    state["all"] = [x for x in all_cores if x.get("id")]
+                    state["installed"] = [x for x in installed if x.get("id")]
+                    state["updates"] = [x for x in updates if x.get("id")]
+                    state["urls"] = urls
+                    urls_list.delete(0, tk.END)
+                    for url in urls:
+                        urls_list.insert(tk.END, url)
+                    render_cards()
+                    set_busy(False)
+                    append_log(self.t("mgr.loaded", "Data loaded."))
+
+                self.after(0, done)
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        def add_url():
+            url = simpledialog.askstring(self.t("mgr.board.json_add", "Add JSON"), self.t("mgr.board.json_prompt", "Board index URL:"))
+            if not url or runtime["busy"]:
+                return
+            set_busy(True)
+            append_log(f"{self.t('mgr.board.json_add', 'Add JSON')}: {url}")
+
+            def worker():
+                out, ok, err = self.backend.add_board_json_sync(url.strip())
+
+                def done():
+                    set_busy(False)
+                    if ok:
+                        refresh_data()
+                    else:
+                        self._show_error_modal(self.t("mgr.board.title", "Board Manager"), err, out)
+
+                self.after(0, done)
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        def remove_url():
+            sel = urls_list.curselection()
+            if not sel or runtime["busy"]:
+                return
+            url = urls_list.get(sel[0])
+            if not messagebox.askyesno(self.t("mgr.board.json_remove", "Remove JSON"), f"{self.t('mgr.board.json_remove_q', 'Remove URL?')}\n{url}"):
+                return
+            set_busy(True)
+            append_log(f"{self.t('mgr.board.json_remove', 'Remove JSON')}: {url}")
+
+            def worker():
+                out, ok, err = self.backend.remove_board_json_sync(url)
+
+                def done():
+                    set_busy(False)
+                    if ok:
+                        refresh_data()
+                    else:
+                        self._show_error_modal(self.t("mgr.board.title", "Board Manager"), err, out)
+
+                self.after(0, done)
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        ttk.Button(top, text=self.t("mgr.reload", "Reload"), command=refresh_data).pack(side=tk.LEFT, padx=4)
+        ttk.Button(urls_btns, text=self.t("mgr.board.json_add", "Add JSON"), command=add_url).pack(side=tk.LEFT, padx=2, fill=tk.X, expand=True)
+        ttk.Button(urls_btns, text=self.t("mgr.board.json_remove", "Remove JSON"), command=remove_url).pack(side=tk.LEFT, padx=2, fill=tk.X, expand=True)
+        filter_combo.bind("<<ComboboxSelected>>", lambda e: render_cards())
+        search_var.trace_add("write", lambda *_: render_cards())
+        refresh_data()
+
+    def _open_library_manager(self):
+        dialog = tk.Toplevel(self)
+        self._apply_window_icon(dialog)
+        dialog.title(self.t("mgr.lib.title", "Library Manager"))
+        dialog.geometry("980x640")
+        dialog.transient(self)
+        dialog.grab_set()
+
+        state = {"all": [], "installed": [], "updates": []}
+        runtime = {"busy": False}
+
+        notebook = ttk.Notebook(dialog)
+        notebook.pack(fill=tk.BOTH, expand=True, padx=8, pady=(8, 4))
+        manager_tab = ttk.Frame(notebook)
+        aux_tab = ttk.Frame(notebook)
+        notebook.add(manager_tab, text=self.t("mgr.tab.manager", "Manager"))
+        notebook.add(aux_tab, text=self.t("mgr.tab.aux", "Auxiliary Settings"))
+
+        top = ttk.Frame(manager_tab, padding=8)
+        top.pack(fill=tk.X)
+        ttk.Label(top, text=self.t("mgr.search", "Search:")).pack(side=tk.LEFT)
+        search_var = tk.StringVar(value="")
+        ttk.Entry(top, textvariable=search_var, width=36).pack(side=tk.LEFT, padx=6)
+        ttk.Label(top, text=self.t("mgr.filter", "Filter:")).pack(side=tk.LEFT, padx=(8, 2))
+
+        filter_map = {
+            "updates": self.t("mgr.filter.updates", "Pending updates"),
+            "installed": self.t("mgr.filter.installed", "Installed"),
+            "all": self.t("mgr.filter.all", "All"),
+        }
+        filter_combo = ttk.Combobox(top, state="readonly", width=22, values=list(filter_map.values()))
+        filter_combo.current(0)
+        filter_combo.pack(side=tk.LEFT, padx=4)
+
+        cards_host = ttk.Frame(manager_tab)
+        cards_host.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 6))
+        cards_canvas = tk.Canvas(cards_host, highlightthickness=0)
+        cards_scroll = ttk.Scrollbar(cards_host, orient="vertical", command=cards_canvas.yview)
+        cards_frame = ttk.Frame(cards_canvas)
+        cards_window = cards_canvas.create_window((0, 0), window=cards_frame, anchor="nw")
+        cards_canvas.configure(yscrollcommand=cards_scroll.set)
+        cards_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        cards_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        cards_frame.bind("<Configure>", lambda e: cards_canvas.configure(scrollregion=cards_canvas.bbox("all")))
+        cards_canvas.bind("<Configure>", lambda e: cards_canvas.itemconfigure(cards_window, width=e.width))
+
+        aux_main = ttk.Frame(aux_tab, padding=10)
+        aux_main.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(aux_main, text=self.t("mgr.lib.aux_repo", "Auxiliary Repository (optional):"), font=("Arial", 10, "bold")).pack(anchor="w")
+        aux_var = tk.StringVar(value=self._get_aux_library_repo())
+        ttk.Entry(aux_main, textvariable=aux_var).pack(fill=tk.X, pady=(6, 6))
+        ttk.Button(aux_main, text=self.t("mgr.save", "Save"), command=lambda: self._set_aux_library_repo(aux_var.get())).pack(anchor="w")
+
+        footer = ttk.Frame(dialog, padding=(8, 2, 8, 8))
+        footer.pack(fill=tk.X)
+        progress = ttk.Progressbar(footer, mode="indeterminate")
+        progress.pack(fill=tk.X)
+        log_box = scrolledtext.ScrolledText(footer, height=4, font=("Courier", 8))
+        log_box.pack(fill=tk.X, pady=(4, 0))
+        log_box.config(state=tk.DISABLED)
+
+        def append_log(text):
+            log_box.config(state=tk.NORMAL)
+            log_box.insert(tk.END, f"{text}\n")
+            log_box.see(tk.END)
+            log_box.config(state=tk.DISABLED)
+
+        def set_busy(flag):
+            runtime["busy"] = flag
+            if flag:
+                progress.start(10)
+            else:
+                progress.stop()
+
+        def on_close():
+            if runtime["busy"]:
+                messagebox.showinfo(self.t("info.title", "Info"), self.t("mgr.busy_wait", "Wait for the current action to finish."))
+                return
+            dialog.destroy()
+
+        dialog.protocol("WM_DELETE_WINDOW", on_close)
+
+        def selected_filter():
+            label = filter_combo.get()
+            for code, display in filter_map.items():
+                if display == label:
+                    return code
+            return "updates"
+
+        def render_cards():
+            for w in cards_frame.winfo_children():
+                w.destroy()
+
+            if selected_filter() == "installed":
+                items = state["installed"]
+            elif selected_filter() == "all":
+                items = state["all"]
+            else:
+                items = state["updates"]
+
+            term = search_var.get().strip().lower()
+            for lib in items:
+                name = lib.get("name", "")
+                if not name:
+                    continue
+                if term and term not in f"{name} {lib.get('sentence','')}".lower():
+                    continue
+
+                installed_v = lib.get("version", "")
+                latest_v = lib.get("latest_version", "")
+                versions = list(lib.get("versions", []))
+                if latest_v and latest_v not in versions:
+                    versions.insert(0, latest_v)
+                if installed_v and installed_v not in versions:
+                    versions.append(installed_v)
+                if not versions:
+                    versions = [latest_v or installed_v or ""]
+
+                has_install = not bool(installed_v)
+                has_update = bool(installed_v and latest_v and installed_v != latest_v)
+                default_version = latest_v if (has_install or has_update) else (installed_v or latest_v)
+
+                card = ttk.LabelFrame(cards_frame, text=name, padding=8)
+                card.pack(fill=tk.X, pady=4)
+                ttk.Label(card, text=lib.get("sentence") or self.t("mgr.no_description", "No description."), wraplength=840, justify=tk.LEFT).pack(anchor="w")
+                ttk.Label(card, text=f"{self.t('mgr.installed', 'Installed')}: {installed_v or '-'}").pack(anchor="w", pady=(4, 0))
+                ttk.Label(card, text=f"{self.t('mgr.latest', 'Latest')}: {latest_v or '-'}").pack(anchor="w")
+
+                if lib.get("url"):
+                    url = lib["url"]
+                    link = tk.Label(card, text=url, fg="#0066cc", cursor="hand2")
+                    link.pack(anchor="w")
+                    link.bind("<Button-1>", lambda e, u=url: webbrowser.open(u))
+
+                row = ttk.Frame(card)
+                row.pack(fill=tk.X, pady=(6, 0))
+                ttk.Label(row, text=self.t("mgr.version", "Version:")).pack(side=tk.LEFT)
+                version_var = tk.StringVar(value=default_version or versions[0])
+                ttk.Combobox(row, state="readonly", width=24, textvariable=version_var, values=versions).pack(side=tk.LEFT, padx=6)
+
+                if has_install:
+                    action_text = self.t("mgr.install", "Install")
+                elif has_update:
+                    action_text = self.t("mgr.update", "Update")
+                else:
+                    action_text = self.t("mgr.installed_state", "Installed")
+
+                def make_action(nm=name, install=has_install, update=has_update, vv=version_var):
+                    def run_action():
+                        if runtime["busy"]:
+                            return
+                        version = (vv.get() or "").strip()
+                        set_busy(True)
+                        append_log(f"{action_text}: {nm} {version}")
+
+                        def worker():
+                            if install:
+                                out, ok, err = self.backend.install_library_sync(nm, version)
+                            elif update:
+                                out, ok, err = self.backend.install_library_sync(nm, version) if version else self.backend.upgrade_library_sync(nm)
+                            else:
+                                out, ok, err = ("", True, "")
+
+                            def done():
+                                set_busy(False)
+                                if ok:
+                                    append_log(self.t("mgr.action_ok", "Done."))
+                                    refresh_data()
+                                    self._load_libs()
+                                else:
+                                    append_log(f"{self.t('error.title', 'Error')}: {err}")
+                                    self._show_error_modal(self.t("mgr.lib.title", "Library Manager"), err, out)
+
+                            self.after(0, done)
+
+                        threading.Thread(target=worker, daemon=True).start()
+                    return run_action
+
+                btn = ttk.Button(row, text=action_text, command=make_action())
+                btn.pack(side=tk.LEFT, padx=6)
+                if not (has_install or has_update):
+                    btn.state(["disabled"])
+
+        def refresh_data():
+            if runtime["busy"]:
+                return
+            set_busy(True)
+            append_log(self.t("mgr.loading", "Loading data..."))
+
+            def worker():
+                all_libs = [self._normalize_library_entry(x) for x in self.backend.search_libraries("")]
+                installed = [self._normalize_library_entry(x) for x in self.backend.list_libraries_fixed()]
+                updates = [self._normalize_library_entry(x) for x in self.backend.list_library_updates()]
+                installed_map = {x.get("name", "").lower(): x for x in installed if x.get("name")}
+                updates_map = {x.get("name", "").lower(): x for x in updates if x.get("name")}
+
+                merged = []
+                for lib in all_libs:
+                    key = lib.get("name", "").lower()
+                    if key in installed_map:
+                        lib["version"] = installed_map[key].get("version", lib.get("version", ""))
+                    if key in updates_map:
+                        lib["latest_version"] = updates_map[key].get("latest_version", lib.get("latest_version", ""))
+                    if lib.get("name") and not lib.get("versions"):
+                        lib["versions"] = self.backend.get_library_versions(lib["name"])
+                    merged.append(lib)
+
+                def done():
+                    state["all"] = [x for x in merged if x.get("name")]
+                    state["installed"] = [x for x in installed if x.get("name")]
+                    state["updates"] = [x for x in updates if x.get("name")]
+                    render_cards()
+                    set_busy(False)
+                    append_log(self.t("mgr.loaded", "Data loaded."))
+
+                self.after(0, done)
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        ttk.Button(top, text=self.t("mgr.reload", "Reload"), command=refresh_data).pack(side=tk.LEFT, padx=4)
+        filter_combo.bind("<<ComboboxSelected>>", lambda e: render_cards())
+        search_var.trace_add("write", lambda *_: render_cards())
+        refresh_data()
+
     def _update_boards_combo_cached(self):
         """Mantido por compatibilidade (seleção agora é via modal)."""
         if self.boards_cache is None:
@@ -1380,8 +1944,10 @@ class VCliApp(tk.Tk):
             self.variant_options = variants
             var_row = ttk.Frame(self.dynamic_config_frame)
             var_row.pack(fill=tk.X, pady=5)
+            var_row.grid_columnconfigure(0, weight=1, uniform="dyn")
+            var_row.grid_columnconfigure(1, weight=1, uniform="dyn")
 
-            ttk.Label(var_row, text="Variante:", font=("Arial", 9, "bold"), width=15).pack(side=tk.LEFT, padx=5)
+            ttk.Label(var_row, text="Variante:", font=("Arial", 9, "bold")).grid(row=0, column=0, sticky="w", padx=(5, 8))
             selected_variant = self._find_option(variants, self.current_config.get('variant', ''))
             if not selected_variant and variants:
                 selected_variant = variants[0]
@@ -1394,16 +1960,15 @@ class VCliApp(tk.Tk):
                 bd=1,
                 padx=4,
                 pady=2,
-                width=30,
                 anchor="w"
             )
-            variant_display.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
+            variant_display.grid(row=0, column=1, sticky="ew", padx=(0, 5))
             ttk.Button(var_row, text="...", width=3, command=lambda: self._open_option_modal(
                 "Variante",
                 self.variant_options,
                 self.current_config.get('variant', ''),
                 lambda opt: self._set_variant_value(opt, variant_display)
-            )).pack(side=tk.LEFT, padx=5)
+            )).grid(row=0, column=2, padx=(2, 5))
 
         # ===== FERRAMENTAS CUSTOMIZADAS =====
         if tools:
@@ -1431,8 +1996,10 @@ class VCliApp(tk.Tk):
             # Row para cada ferramenta
             row = ttk.Frame(self.dynamic_config_frame)
             row.pack(fill=tk.X, pady=5)
+            row.grid_columnconfigure(0, weight=1, uniform="dyn")
+            row.grid_columnconfigure(1, weight=1, uniform="dyn")
             
-            ttk.Label(row, text=f"{tool_name}:", font=("Arial", 9, "bold"), width=15).pack(side=tk.LEFT, padx=5)
+            ttk.Label(row, text=f"{tool_name}:", font=("Arial", 9, "bold")).grid(row=0, column=0, sticky="w", padx=(5, 8))
 
             selected_option = self._find_option(values, default_value_id)
             if selected_option:
@@ -1446,16 +2013,15 @@ class VCliApp(tk.Tk):
                 bd=1,
                 padx=4,
                 pady=2,
-                width=30,
                 anchor="w"
             )
-            value_display.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
+            value_display.grid(row=0, column=1, sticky="ew", padx=(0, 5))
             ttk.Button(row, text="...", width=3, command=lambda t=tool, tid=tool_id, tname=tool_name, label=value_display: self._open_option_modal(
                 tname,
                 t.get("values", []),
                 saved_tools.get(tid, ""),
                 lambda opt, tool_key=tid, lbl=label: self._set_tool_value(tool_key, opt, lbl)
-            )).pack(side=tk.LEFT, padx=5)
+            )).grid(row=0, column=2, padx=(2, 5))
 
         self._save_config()
     
@@ -1536,13 +2102,43 @@ class VCliApp(tk.Tk):
     
     def _install_lib_zip(self):
         path = filedialog.askopenfilename(filetypes=[("ZIP", "*.zip")])
-        if path:
-            self.backend.install_library_zip(path)
+        if not path:
+            return
+        busy_modal = self._show_busy_modal(
+            "Bibliotecas",
+            "Instalando biblioteca ZIP...",
+            ["[PRE-DEBUG]", f"ZIP: {path}"],
+        )
+
+        def worker():
+            output, ok, err = self.backend.install_library_zip_sync(path)
+            self.after(0, lambda: self._close_busy_modal(busy_modal))
+            if not ok:
+                self._show_error_modal("Bibliotecas", err, output)
+                return
+            self._load_libs()
+
+        threading.Thread(target=worker, daemon=True).start()
     
     def _search_lib(self):
         name = simpledialog.askstring("Buscar", "Nome:")
-        if name:
-            self.backend.install_library(name)
+        if not name:
+            return
+        busy_modal = self._show_busy_modal(
+            "Bibliotecas",
+            "Instalando biblioteca...",
+            ["[PRE-DEBUG]", f"Biblioteca: {name}"],
+        )
+
+        def worker():
+            output, ok, err = self.backend.install_library_sync(name.strip())
+            self.after(0, lambda: self._close_busy_modal(busy_modal))
+            if not ok:
+                self._show_error_modal("Bibliotecas", err, output)
+                return
+            self._load_libs()
+
+        threading.Thread(target=worker, daemon=True).start()
     
     # CONFIG
     def _save_config(self):
