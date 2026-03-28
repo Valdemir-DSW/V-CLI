@@ -158,6 +158,7 @@ class VCliApp(tk.Tk):
         self._create_boards_tab()
         self._create_libs_tab()
         self._create_serial_tab()
+        self._create_cli_tab()
         
         # CONSOLE EM DESTAQUE (30%)
         console_frame = ttk.LabelFrame(r_split, text=self.t("panel.output", "OUTPUT"), padding=2)
@@ -519,6 +520,83 @@ class VCliApp(tk.Tk):
         self.serial_input = tk.Entry(inp, font=("Arial", 8), bd=1, relief=tk.SOLID)
         self.serial_input.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
         ttk.Button(inp, text=">>", command=self._serial_send, width=3).pack(side=tk.LEFT)
+
+    def _create_cli_tab(self):
+        """CLI - Execute Arduino-CLI commands"""
+        tab = ttk.Frame(self.notebook)
+        self.notebook.add(tab, text="CLI")
+
+        # Top frame: command input + help/execute buttons
+        top_frame = ttk.Frame(tab)
+        top_frame.pack(fill=tk.X, padx=2, pady=(2, 1))
+        
+        ttk.Label(top_frame, text=self.t("cli.command", "Command:")).pack(side=tk.LEFT, padx=2)
+        self.cli_input = tk.Entry(top_frame, font=("Courier", 9), bd=1, relief=tk.SOLID)
+        self.cli_input.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
+        self.cli_input.bind("<Return>", lambda e: self._cli_execute())
+        
+        ttk.Button(top_frame, text=self.t("cli.help", "Help"), command=self._cli_help, width=8).pack(side=tk.LEFT, padx=2)
+        ttk.Button(top_frame, text=self.t("cli.execute", "Execute"), command=self._cli_execute, width=8).pack(side=tk.LEFT, padx=2)
+        
+        # Output area
+        self.cli_text = scrolledtext.ScrolledText(tab, bg="black", fg="#00ff00", font=("Courier", 8))
+        self.cli_text.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
+        self.cli_text.config(state=tk.DISABLED)
+
+    def _cli_help(self):
+        """Show arduino-cli help"""
+        self.cli_text.config(state=tk.NORMAL)
+        self.cli_text.delete("1.0", tk.END)
+        self.cli_text.insert(tk.END, "Arduino-CLI Examples:\n")
+        self.cli_text.insert(tk.END, "=" * 60 + "\n\n")
+        self.cli_text.insert(tk.END, "core list              - List installed boards\n")
+        self.cli_text.insert(tk.END, "core search --all      - Search all available boards\n")
+        self.cli_text.insert(tk.END, "lib list               - List installed libraries\n")
+        self.cli_text.insert(tk.END, "lib search <name>      - Search for a library\n")
+        self.cli_text.insert(tk.END, "board listall          - List all supported boards\n")
+        self.cli_text.insert(tk.END, "version                - Show Arduino-CLI version\n")
+        self.cli_text.insert(tk.END, "\nTip: Type a command above and press Enter or click Execute\n")
+        self.cli_text.config(state=tk.DISABLED)
+
+    def _cli_execute(self):
+        """Execute Arduino-CLI command"""
+        cmd_str = self.cli_input.get().strip()
+        if not cmd_str:
+            return
+        
+        self.cli_text.config(state=tk.NORMAL)
+        self.cli_text.delete("1.0", tk.END)
+        self.cli_text.insert(tk.END, f"$ arduino-cli {cmd_str}\n")
+        self.cli_text.insert(tk.END, "=" * 60 + "\n\n")
+        self.cli_text.config(state=tk.DISABLED)
+        self.cli_input.config(state=tk.DISABLED)
+        
+        def worker():
+            try:
+                # Parse command
+                parts = cmd_str.split()
+                output = self.backend.run_cli_sync(parts)
+                
+                def done():
+                    self.cli_text.config(state=tk.NORMAL)
+                    self.cli_text.insert(tk.END, output or "(no output)")
+                    self.cli_text.insert(tk.END, "\n\n" + "=" * 60)
+                    self.cli_text.config(state=tk.DISABLED)
+                    self.cli_input.config(state=tk.NORMAL)
+                    self.cli_input.selection_range(0, tk.END)
+                    self.cli_input.focus()
+                
+                self.after(0, done)
+            except Exception as e:
+                def done():
+                    self.cli_text.config(state=tk.NORMAL)
+                    self.cli_text.insert(tk.END, f"Error: {str(e)}")
+                    self.cli_text.config(state=tk.DISABLED)
+                    self.cli_input.config(state=tk.NORMAL)
+                
+                self.after(0, done)
+        
+        threading.Thread(target=worker, daemon=True).start()
 
     # HISTÓRICO
     def _load_app_settings(self) -> dict:
