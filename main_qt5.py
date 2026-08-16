@@ -1,3 +1,4 @@
+import csv
 import json
 import locale
 import os
@@ -15,12 +16,21 @@ from pathlib import Path
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 from cli_backend import CLIBackend
+from code_editor_tools import CodeEditorDialog
+from serial_csv_tools import (
+    CsvLogBrowserDialog,
+    RecordingSaveDialog,
+    SerialPlotWidget,
+    extract_numeric_series,
+    is_error_line,
+    parse_csv_line,
+)
 
 
 class UiBridge(QtCore.QObject):
     invoke = QtCore.pyqtSignal(object)
     log_message = QtCore.pyqtSignal(str)
-    serial_data = QtCore.pyqtSignal(str)
+    serial_data = QtCore.pyqtSignal(object)
 
 
 class LibraryManagerDialog(QtWidgets.QDialog):
@@ -809,7 +819,7 @@ class VCliQtApp(QtWidgets.QMainWindow):
         self.bridge = UiBridge()
         self.bridge.invoke.connect(lambda fn: fn())
         self.bridge.log_message.connect(self.log)
-        self.bridge.serial_data.connect(self._append_serial_text)
+        self.bridge.serial_data.connect(self._handle_serial_payload)
 
         self.current_project = None
         self.current_config = None
@@ -818,6 +828,14 @@ class VCliQtApp(QtWidgets.QMainWindow):
         self.serial_stamp_enabled = False
         self.serial_tx_enabled = False
         self.serial_tx_log = []
+        self.serial_live_headers = []
+        self.serial_live_records = []
+        self.serial_live_errors = []
+        self.serial_plot_series = {}
+        self.serial_recording_active = False
+        self.serial_recording_session = None
+        self.serial_last_rx_ts = None
+        self.serial_line_counter = 0
         self.available_ports = []
         self.baud_options = ["9600", "19200", "38400", "57600", "115200"]
         self.recent_projects_file = self.appdata_dir / "recent_projects.json"
@@ -1086,12 +1104,17 @@ class VCliQtApp(QtWidgets.QMainWindow):
         file_menu.addAction(self.action_properties)
 
         vcli_menu = menu_bar.addMenu("V CLI")
+        tools_menu = menu_bar.addMenu("Ferramentas")
         settings_action = QtWidgets.QAction("Configurações", self)
         about_action = QtWidgets.QAction("About", self)
+        self.action_open_csv_log = QtWidgets.QAction("Ler Log CSV", self)
+        self.action_code_editor = QtWidgets.QAction("Code Editor", self)
         link_arduino = QtWidgets.QAction("Arduino CLI", self)
         link_python = QtWidgets.QAction("Python", self)
         link_pyqt = QtWidgets.QAction("PyQt5", self)
         link_vscode = QtWidgets.QAction("VS Code", self)
+        tools_menu.addAction(self.action_open_csv_log)
+        tools_menu.addAction(self.action_code_editor)
         vcli_menu.addAction(settings_action)
         vcli_menu.addAction(about_action)
         vcli_menu.addSeparator()
@@ -1108,6 +1131,8 @@ class VCliQtApp(QtWidgets.QMainWindow):
         self.action_upload.triggered.connect(self.upload_project)
         self.action_export.triggered.connect(self.export_binary)
         self.action_properties.triggered.connect(self.edit_project_properties)
+        self.action_open_csv_log.triggered.connect(self.open_csv_log_viewer)
+        self.action_code_editor.triggered.connect(self.open_code_editor_dialog)
         settings_action.triggered.connect(self.open_settings_dialog)
         about_action.triggered.connect(self.show_about_dialog)
         link_arduino.triggered.connect(lambda: webbrowser.open("https://arduino.github.io/arduino-cli/latest/"))
@@ -1254,7 +1279,11 @@ class VCliQtApp(QtWidgets.QMainWindow):
     def _build_serial_tab(self):
         tab = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(tab)
-        controls = QtWidgets.QHBoxLayout()
+        self.serial_views = QtWidgets.QTabWidget()
+        self.serial_views.setTabPosition(QtWidgets.QTabWidget.West)
+        monitor_page = QtWidgets.QWidget()
+        monitor_layout = QtWidgets.QVBoxLayout(monitor_page)
+        monitor_controls = QtWidgets.QHBoxLayout()
         self.serial_toggle_btn = QtWidgets.QPushButton(self.t("serial.connect", "Connect"))
         self.serial_stamp_btn = QtWidgets.QPushButton(self.t("serial.stamp_off", "Stamp time: OFF"))
         self.serial_clear_btn = QtWidgets.QPushButton(self.t("serial.clear", "Clear"))
@@ -1264,30 +1293,121 @@ class VCliQtApp(QtWidgets.QMainWindow):
         self.serial_decode_combo.addItems(["UTF-8", "HEX"])
         self.serial_status = QtWidgets.QLabel(self.t("serial.status_disconnected", "Status: disconnected"))
         for widget in [self.serial_toggle_btn, self.serial_stamp_btn, self.serial_clear_btn, self.serial_export_btn, self.serial_tx_btn]:
-            controls.addWidget(widget)
-        controls.addWidget(QtWidgets.QLabel(self.t("serial.decode", "Decode:")))
-        controls.addWidget(self.serial_decode_combo)
-        controls.addWidget(self.serial_status, 1)
-        layout.addLayout(controls)
+            monitor_controls.addWidget(widget)
+        monitor_controls.addWidget(QtWidgets.QLabel(self.t("serial.decode", "Decode:")))
+        monitor_controls.addWidget(self.serial_decode_combo)
+        monitor_controls.addWidget(self.serial_status, 1)
+        monitor_layout.addLayout(monitor_controls)
+
         self.serial_text = QtWidgets.QPlainTextEdit()
         self.serial_text.setObjectName("serialBox")
         self.serial_text.setReadOnly(True)
-        layout.addWidget(self.serial_text, 1)
+        monitor_layout.addWidget(self.serial_text, 1)
+
         send_row = QtWidgets.QHBoxLayout()
         self.serial_input = QtWidgets.QLineEdit()
         self.serial_send_btn = QtWidgets.QPushButton(">>")
         send_row.addWidget(QtWidgets.QLabel(self.t("serial.send", "Send:")))
         send_row.addWidget(self.serial_input, 1)
         send_row.addWidget(self.serial_send_btn)
-        layout.addLayout(send_row)
+        monitor_layout.addLayout(send_row)
+        self.serial_views.addTab(monitor_page, "Monitor Serial")
 
+        plot_page = QtWidgets.QWidget()
+        plot_layout = QtWidgets.QVBoxLayout(plot_page)
+        plot_controls = QtWidgets.QHBoxLayout()
+        self.serial_plot_toggle_btn = QtWidgets.QPushButton(self.t("serial.connect", "Connect"))
+        self.serial_plot_clear_btn = QtWidgets.QPushButton("Limpar plot")
+        self.serial_plot_decode_combo = QtWidgets.QComboBox()
+        self.serial_plot_decode_combo.addItems(["UTF-8", "HEX"])
+        self.serial_plot_type_combo = QtWidgets.QComboBox()
+        self.serial_plot_type_combo.addItems(["line", "step", "scatter", "bar"])
+        self.serial_plot_series_limit = QtWidgets.QSpinBox()
+        self.serial_plot_series_limit.setRange(1, 12)
+        self.serial_plot_series_limit.setValue(4)
+        self.serial_plot_status = QtWidgets.QLabel(self.t("serial.status_disconnected", "Status: disconnected"))
+        self.serial_plot_fps_label = QtWidgets.QLabel("RX FPS: 0.00")
+        plot_controls.addWidget(self.serial_plot_toggle_btn)
+        plot_controls.addWidget(self.serial_plot_clear_btn)
+        plot_controls.addWidget(QtWidgets.QLabel(self.t("serial.decode", "Decode:")))
+        plot_controls.addWidget(self.serial_plot_decode_combo)
+        plot_controls.addWidget(QtWidgets.QLabel("Plot:"))
+        plot_controls.addWidget(self.serial_plot_type_combo)
+        plot_controls.addWidget(QtWidgets.QLabel("Variáveis:"))
+        plot_controls.addWidget(self.serial_plot_series_limit)
+        plot_controls.addWidget(self.serial_plot_fps_label)
+        plot_controls.addWidget(self.serial_plot_status, 1)
+        plot_layout.addLayout(plot_controls)
+
+        plot_content = QtWidgets.QHBoxLayout()
+        plot_side = QtWidgets.QVBoxLayout()
+        self.serial_series_list = QtWidgets.QListWidget()
+        plot_side.addWidget(QtWidgets.QLabel("Séries disponíveis"))
+        plot_side.addWidget(self.serial_series_list, 1)
+        self.serial_plot_widget = SerialPlotWidget()
+        plot_content.addLayout(plot_side, 1)
+        plot_content.addWidget(self.serial_plot_widget, 4)
+        plot_layout.addLayout(plot_content, 1)
+        self.serial_views.addTab(plot_page, "Plotter Serial")
+
+        csv_page = QtWidgets.QWidget()
+        csv_layout = QtWidgets.QVBoxLayout(csv_page)
+        csv_controls = QtWidgets.QHBoxLayout()
+        self.serial_csv_toggle_btn = QtWidgets.QPushButton(self.t("serial.connect", "Connect"))
+        self.serial_rec_btn = QtWidgets.QPushButton("Gravar CSV")
+        self.serial_stop_rec_btn = QtWidgets.QPushButton("Parar gravação")
+        self.serial_csv_clear_btn = QtWidgets.QPushButton("Limpar CSV")
+        self.serial_csv_decode_combo = QtWidgets.QComboBox()
+        self.serial_csv_decode_combo.addItems(["UTF-8", "HEX"])
+        self.serial_csv_status = QtWidgets.QLabel(self.t("serial.status_disconnected", "Status: disconnected"))
+        self.serial_fps_label = QtWidgets.QLabel("RX FPS: 0.00")
+        for widget in [self.serial_csv_toggle_btn, self.serial_rec_btn, self.serial_stop_rec_btn, self.serial_csv_clear_btn]:
+            csv_controls.addWidget(widget)
+        csv_controls.addWidget(QtWidgets.QLabel(self.t("serial.decode", "Decode:")))
+        csv_controls.addWidget(self.serial_csv_decode_combo)
+        csv_controls.addWidget(self.serial_fps_label)
+        csv_controls.addWidget(self.serial_csv_status, 1)
+        csv_layout.addLayout(csv_controls)
+
+        self.serial_csv_summary = QtWidgets.QLabel("Aguardando CSV...")
+        self.serial_csv_summary.setWordWrap(True)
+        self.serial_csv_summary.setStyleSheet("padding: 8px 10px; border: 1px solid #c6d0da; border-radius: 10px; background: rgba(40,120,180,0.06);")
+        csv_layout.addWidget(self.serial_csv_summary)
+        csv_split = QtWidgets.QSplitter(QtCore.Qt.Vertical)
+        self.serial_csv_table = QtWidgets.QTableWidget(0, 0)
+        self.serial_csv_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.serial_csv_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.serial_csv_table.horizontalHeader().setStretchLastSection(True)
+        self.serial_csv_errors = QtWidgets.QPlainTextEdit()
+        self.serial_csv_errors.setReadOnly(True)
+        csv_split.addWidget(self.serial_csv_table)
+        csv_split.addWidget(self.serial_csv_errors)
+        csv_split.setStretchFactor(0, 4)
+        csv_split.setStretchFactor(1, 1)
+        csv_layout.addWidget(csv_split, 1)
+        self.serial_views.addTab(csv_page, "Log Serial CSV")
+
+        layout.addWidget(self.serial_views, 1)
         self.serial_toggle_btn.clicked.connect(self.serial_toggle)
+        self.serial_plot_toggle_btn.clicked.connect(self.serial_toggle)
+        self.serial_csv_toggle_btn.clicked.connect(self.serial_toggle)
         self.serial_stamp_btn.clicked.connect(self.toggle_serial_stamp)
         self.serial_clear_btn.clicked.connect(self.serial_clear)
+        self.serial_plot_clear_btn.clicked.connect(self.serial_clear)
+        self.serial_csv_clear_btn.clicked.connect(self.serial_clear)
         self.serial_export_btn.clicked.connect(self.serial_export)
         self.serial_tx_btn.clicked.connect(self.toggle_serial_tx)
+        self.serial_rec_btn.clicked.connect(self.start_serial_recording)
+        self.serial_stop_rec_btn.clicked.connect(self.stop_serial_recording)
         self.serial_send_btn.clicked.connect(self.serial_send)
         self.serial_input.returnPressed.connect(self.serial_send)
+        self.serial_decode_combo.currentTextChanged.connect(self._sync_serial_decode_mode)
+        self.serial_plot_decode_combo.currentTextChanged.connect(self._sync_serial_decode_mode)
+        self.serial_csv_decode_combo.currentTextChanged.connect(self._sync_serial_decode_mode)
+        self.serial_plot_type_combo.currentTextChanged.connect(self._refresh_live_plot)
+        self.serial_plot_series_limit.valueChanged.connect(self._refresh_live_plot)
+        self.serial_series_list.itemChanged.connect(lambda *_: self._refresh_live_plot())
+        self.serial_stop_rec_btn.setEnabled(False)
         self.tabs.addTab(tab, self.t("tab.serial", "Serial"))
 
     def _build_cli_tab(self):
@@ -1476,6 +1596,8 @@ class VCliQtApp(QtWidgets.QMainWindow):
             getattr(self, "action_upload", None),
             getattr(self, "action_export", None),
             getattr(self, "action_properties", None),
+            getattr(self, "action_open_csv_log", None),
+            getattr(self, "action_code_editor", None),
         ]:
             if action:
                 action.setEnabled(enabled)
@@ -2886,15 +3008,216 @@ class VCliQtApp(QtWidgets.QMainWindow):
         self._set_combo_value(self.port_combo, current)
         self.port_combo.blockSignals(False)
 
+    def _serial_logs_dir(self) -> Path:
+        base = self.current_project if self.current_project else Path.cwd()
+        logs_dir = base / "logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        return logs_dir
+
+    def _sync_serial_decode_mode(self, text: str):
+        combos = [self.serial_decode_combo, self.serial_plot_decode_combo, self.serial_csv_decode_combo]
+        for combo in combos:
+            if combo.currentText() == text:
+                continue
+            combo.blockSignals(True)
+            combo.setCurrentText(text)
+            combo.blockSignals(False)
+
+    def _selected_plot_series(self):
+        selected = []
+        for index in range(self.serial_series_list.count()):
+            item = self.serial_series_list.item(index)
+            if item.checkState() == QtCore.Qt.Checked:
+                selected.append(item.text())
+        return selected
+
+    def _sync_series_selector(self):
+        existing = {}
+        for index in range(self.serial_series_list.count()):
+            item = self.serial_series_list.item(index)
+            existing[item.text()] = item.checkState()
+        visible_limit = self.serial_plot_series_limit.value() if hasattr(self, "serial_plot_series_limit") else 4
+        self.serial_series_list.blockSignals(True)
+        self.serial_series_list.clear()
+        for index, name in enumerate(self.serial_plot_series.keys()):
+            item = QtWidgets.QListWidgetItem(name)
+            item.setFlags(item.flags() | QtCore.Qt.ItemIsUserCheckable)
+            state = existing.get(name)
+            if state is None:
+                state = QtCore.Qt.Checked if index < visible_limit else QtCore.Qt.Unchecked
+            item.setCheckState(state)
+            self.serial_series_list.addItem(item)
+        self.serial_series_list.blockSignals(False)
+
+    def _refresh_live_plot(self):
+        self.serial_plot_widget.set_data(
+            self.serial_plot_series,
+            selected_series=self._selected_plot_series(),
+            plot_type=self.serial_plot_type_combo.currentText(),
+        )
+
+    def _refresh_csv_table(self):
+        if not self.serial_live_records:
+            self.serial_csv_table.setRowCount(0)
+            self.serial_csv_table.setColumnCount(0)
+            self.serial_csv_summary.setText("Aguardando CSV e eventos do stream serial...")
+            self.serial_csv_errors.setPlainText("\n\n".join(self.serial_live_errors[-20:]) or "Sem erros no stream.")
+            return
+        base_headers = ["timestamp", "elapsed_ms", "rx_fps"]
+        headers = base_headers + list(self.serial_live_headers)
+        self.serial_csv_table.setColumnCount(len(headers))
+        self.serial_csv_table.setHorizontalHeaderLabels(headers)
+        self.serial_csv_table.setRowCount(len(self.serial_live_records))
+        for row_index, record in enumerate(self.serial_live_records):
+            for col_index, header in enumerate(headers):
+                value = record.get(header, "")
+                self.serial_csv_table.setItem(row_index, col_index, QtWidgets.QTableWidgetItem(str(value)))
+        self.serial_csv_table.scrollToBottom()
+        self.serial_csv_summary.setText(
+            f"Pacotes CSV {len(self.serial_live_records)}   •   Colunas {len(self.serial_live_headers)}   •   "
+            f"Erros {len(self.serial_live_errors)}   •   FPS {self.serial_fps_label.text().replace('RX FPS: ', '')}"
+        )
+        self.serial_csv_errors.setPlainText("\n\n".join(self.serial_live_errors[-20:]) or "Sem erros no stream.")
+
+    def _reset_live_serial_views(self):
+        self.serial_live_headers = []
+        self.serial_live_records = []
+        self.serial_live_errors = []
+        self.serial_plot_series = {}
+        self.serial_last_rx_ts = None
+        self.serial_line_counter = 0
+        self.serial_fps_label.setText("RX FPS: 0.00")
+        self.serial_plot_fps_label.setText("RX FPS: 0.00")
+        self._sync_series_selector()
+        self._refresh_live_plot()
+        self._refresh_csv_table()
+
+    def _sanitize_log_name(self, text: str) -> str:
+        cleaned = "".join(ch if ch.isalnum() or ch in ("_", "-", ".") else "_" for ch in str(text or "").strip())
+        return cleaned.strip("._-") or datetime.now().strftime("log_%Y%m%d_%H%M%S")
+
+    def start_serial_recording(self):
+        if self.serial_recording_active:
+            return
+        logs_dir = self._serial_logs_dir()
+        session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+        temp_path = logs_dir / f".recording_{session_id}.jsonl"
+        self.serial_recording_session = {
+            "id": session_id,
+            "temp_path": temp_path,
+            "started_at": datetime.now().isoformat(timespec="seconds"),
+            "project": self.current_project.name if self.current_project else "",
+            "description": "",
+        }
+        temp_path.write_text("", encoding="utf-8")
+        self.serial_recording_active = True
+        self.serial_rec_btn.setEnabled(False)
+        self.serial_stop_rec_btn.setEnabled(True)
+        self.log(f"[SERIAL] Gravação CSV iniciada: {temp_path.name}")
+
+    def _write_recording_event(self, record: dict):
+        if not self.serial_recording_active or not self.serial_recording_session:
+            return
+        temp_path = self.serial_recording_session["temp_path"]
+        try:
+            with open(temp_path, "a", encoding="utf-8") as handle:
+                handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except Exception as exc:
+            self.log(f"[ERRO] Falha ao gravar log temporário: {exc}")
+
+    def stop_serial_recording(self):
+        if not self.serial_recording_active or not self.serial_recording_session:
+            return
+        dialog = RecordingSaveDialog(self, f"log_{self.serial_recording_session['id']}")
+        result = dialog.exec_()
+        name, description = dialog.values()
+        temp_path = self.serial_recording_session["temp_path"]
+        self.serial_recording_active = False
+        self.serial_rec_btn.setEnabled(True)
+        self.serial_stop_rec_btn.setEnabled(False)
+        if result == 2:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+            self.log("[SERIAL] Gravação descartada.")
+            self.serial_recording_session = None
+            return
+        if result != 1:
+            self.serial_recording_active = True
+            self.serial_rec_btn.setEnabled(False)
+            self.serial_stop_rec_btn.setEnabled(True)
+            return
+        records = []
+        try:
+            with open(temp_path, "r", encoding="utf-8") as handle:
+                for line in handle:
+                    line = line.strip()
+                    if line:
+                        records.append(json.loads(line))
+        except Exception as exc:
+            self.show_error_dialog("Log CSV", str(exc))
+            self.serial_recording_session = None
+            return
+
+        csv_headers = []
+        for record in records:
+            for key in record.keys():
+                if key not in {"event_type", "timestamp", "date", "time", "elapsed_ms", "rx_fps", "line_index", "error_flag", "error_message", "raw"} and key not in csv_headers:
+                    csv_headers.append(key)
+        final_name = self._sanitize_log_name(name)
+        logs_dir = self._serial_logs_dir()
+        csv_path = logs_dir / f"{final_name}.csv"
+        meta_path = logs_dir / f"{final_name}.meta.json"
+        fieldnames = ["event_type", "timestamp", "date", "time", "elapsed_ms", "rx_fps", "line_index", "error_flag", "error_message", "raw"] + csv_headers
+        try:
+            with open(csv_path, "w", encoding="utf-8", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=fieldnames)
+                writer.writeheader()
+                for record in records:
+                    row = {key: record.get(key, "") for key in fieldnames}
+                    writer.writerow(row)
+            meta = {
+                "name": final_name,
+                "description": description,
+                "started_at": self.serial_recording_session.get("started_at"),
+                "finished_at": datetime.now().isoformat(timespec="seconds"),
+                "project": self.serial_recording_session.get("project", ""),
+                "row_count": len(records),
+                "error_count": sum(1 for item in records if item.get("error_flag")),
+                "headers": csv_headers,
+            }
+            meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+            temp_path.unlink(missing_ok=True)
+            self.log(f"[SERIAL] Log CSV salvo: {csv_path}")
+        except Exception as exc:
+            self.show_error_dialog("Log CSV", str(exc))
+        self.serial_recording_session = None
+
+    def open_csv_log_viewer(self):
+        dialog = CsvLogBrowserDialog(self, self._serial_logs_dir())
+        dialog.exec_()
+
+    def open_code_editor_dialog(self):
+        if not self.current_project:
+            QtWidgets.QMessageBox.information(self, "Code Editor", "Abra um projeto para usar o Code Editor.")
+            return
+        dialog = CodeEditorDialog(self, self.current_project)
+        dialog.exec_()
+
     def refresh_serial_status(self, connected: bool, port: str = "", baud: str = ""):
         if connected:
-            self.serial_toggle_btn.setText(self.t("serial.disconnect", "Disconnect"))
-            self.serial_status.setText(f"{self.t('serial.status_connected', 'Status: connected')} {port or 'auto'} @ {baud or '115200'}")
+            connect_text = self.t("serial.disconnect", "Disconnect")
+            status_text = f"{self.t('serial.status_connected', 'Status: connected')} {port or 'auto'} @ {baud or '115200'}"
         else:
             saved_port = self.port_combo.currentText() or "auto"
             saved_baud = self.baud_combo.currentText() or "115200"
-            self.serial_toggle_btn.setText(self.t("serial.connect", "Connect"))
-            self.serial_status.setText(f"{self.t('serial.status', 'Status:')} {saved_port} @ {saved_baud}")
+            connect_text = self.t("serial.connect", "Connect")
+            status_text = f"{self.t('serial.status', 'Status:')} {saved_port} @ {saved_baud}"
+        for button in [self.serial_toggle_btn, self.serial_plot_toggle_btn, self.serial_csv_toggle_btn]:
+            button.setText(connect_text)
+        for label in [self.serial_status, self.serial_plot_status, self.serial_csv_status]:
+            label.setText(status_text)
 
     def toggle_serial_stamp(self):
         self.serial_stamp_enabled = not self.serial_stamp_enabled
@@ -2909,6 +3232,7 @@ class VCliQtApp(QtWidgets.QMainWindow):
     def serial_clear(self):
         self.serial_text.clear()
         self.serial_tx_log.clear()
+        self._reset_live_serial_views()
 
     def serial_export(self):
         path, _ = QtWidgets.QFileDialog.getSaveFileName(self, self.t("serial.export_title", "Export serial log"), "", "Log (*.log);;Text (*.txt)")
@@ -2926,6 +3250,7 @@ class VCliQtApp(QtWidgets.QMainWindow):
             self.serial_connect()
 
     def serial_connect(self):
+        self._reset_live_serial_views()
         port = self.port_combo.currentText()
         if not port or port == "auto":
             ports = self.get_serial_ports()
@@ -2944,6 +3269,10 @@ class VCliQtApp(QtWidgets.QMainWindow):
             self.show_error_dialog(self.t("error.title", "Error"), str(exc))
 
     def serial_disconnect(self):
+        if self.serial_recording_active:
+            self.stop_serial_recording()
+            if self.serial_recording_active:
+                return
         if self.serial_connection:
             try:
                 self.serial_connection.close()
@@ -2976,17 +3305,89 @@ class VCliQtApp(QtWidgets.QMainWindow):
                         raw = self.serial_connection.readline()
                         if not raw:
                             continue
+                        now = datetime.now()
                         if self.serial_decode_combo.currentText() == "HEX":
                             payload = raw.hex(" ").upper().strip()
                         else:
                             payload = raw.decode(errors="ignore").rstrip("\r\n")
+                        delta = (now - self.serial_last_rx_ts).total_seconds() if self.serial_last_rx_ts else 0
+                        rx_fps = (1.0 / delta) if delta > 0 else 0.0
+                        self.serial_last_rx_ts = now
                         if self.serial_stamp_enabled:
-                            payload = f"{datetime.now().strftime('%H:%M:%S')} -> {payload}"
-                        self.bridge.serial_data.emit(payload)
+                            payload = f"{now.strftime('%H:%M:%S')} -> {payload}"
+                        self.serial_line_counter += 1
+                        self.bridge.serial_data.emit({
+                            "text": payload,
+                            "raw_text": raw.decode(errors="ignore").rstrip("\r\n"),
+                            "timestamp": now,
+                            "rx_fps": rx_fps,
+                            "line_index": self.serial_line_counter,
+                        })
                 except Exception:
                     break
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _handle_serial_payload(self, payload):
+        if isinstance(payload, dict):
+            self._append_serial_text(payload.get("text", ""))
+            self._process_serial_line(payload)
+            return
+        self._append_serial_text(str(payload))
+
+    def _process_serial_line(self, payload: dict):
+        raw_text = str(payload.get("raw_text", ""))
+        timestamp = payload.get("timestamp") or datetime.now()
+        line_index = int(payload.get("line_index", 0))
+        rx_fps = float(payload.get("rx_fps", 0.0) or 0.0)
+        self.serial_fps_label.setText(f"RX FPS: {rx_fps:.2f}")
+        self.serial_plot_fps_label.setText(f"RX FPS: {rx_fps:.2f}")
+        elapsed_ms = 0.0
+        if self.serial_recording_session:
+            started_at = datetime.fromisoformat(self.serial_recording_session["started_at"])
+            elapsed_ms = round((timestamp - started_at).total_seconds() * 1000.0, 3)
+        elif self.serial_live_records:
+            first_ts = self.serial_live_records[0].get("timestamp_obj")
+            if isinstance(first_ts, datetime):
+                elapsed_ms = round((timestamp - first_ts).total_seconds() * 1000.0, 3)
+
+        parsed = parse_csv_line(raw_text, self.serial_live_headers)
+        record = {
+            "event_type": "text",
+            "timestamp": timestamp.isoformat(timespec="seconds"),
+            "date": timestamp.strftime("%Y-%m-%d"),
+            "time": timestamp.strftime("%H:%M:%S"),
+            "elapsed_ms": elapsed_ms,
+            "rx_fps": round(rx_fps, 4),
+            "line_index": line_index,
+            "error_flag": False,
+            "error_message": "",
+            "raw": raw_text,
+        }
+        if parsed:
+            if parsed["kind"] == "header":
+                self.serial_live_headers = parsed["headers"]
+                self._refresh_csv_table()
+            else:
+                record["event_type"] = "csv"
+                for key, value in parsed["mapping"].items():
+                    record[key] = value
+                live_record = dict(record)
+                live_record["timestamp_obj"] = timestamp
+                self.serial_live_records.append(live_record)
+                self.serial_live_records = self.serial_live_records[-500:]
+                self.serial_plot_series = extract_numeric_series(self.serial_live_records)
+                self._sync_series_selector()
+                self._refresh_live_plot()
+                self._refresh_csv_table()
+        if is_error_line(raw_text):
+            record["event_type"] = "error" if record["event_type"] == "text" else record["event_type"]
+            record["error_flag"] = True
+            record["error_message"] = raw_text
+            self.serial_live_errors.append(f"[{record['timestamp']}] {raw_text}")
+            self.serial_live_errors = self.serial_live_errors[-200:]
+            self._refresh_csv_table()
+        self._write_recording_event(record)
 
     def _append_serial_text(self, text: str):
         self.serial_text.appendPlainText(text)

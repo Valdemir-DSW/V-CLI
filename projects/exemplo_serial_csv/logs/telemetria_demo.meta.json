@@ -1,0 +1,16 @@
+{
+  "name": "telemetria_demo",
+  "description": "Exemplo de log CSV com FPS, temperatura, pressão e um erro no meio da captura.",
+  "started_at": "2026-08-16T14:30:00",
+  "finished_at": "2026-08-16T14:30:01",
+  "project": "exemplo_serial_csv",
+  "row_count": 7,
+  "error_count": 1,
+  "headers": [
+    "tempo_ms",
+    "fps",
+    "temp_c",
+    "pressao_kpa",
+    "status"
+  ]
+}
