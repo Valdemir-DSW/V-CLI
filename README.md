@@ -10,7 +10,7 @@
 
 ### Overview
 
-V CLI is a professional Tkinter-based interface for `arduino-cli`, designed to streamline Arduino project development. It provides an intuitive workspace with project management, real-time serial monitoring, and comprehensive board/library support.
+V CLI is a professional PyQt5-based interface for `arduino-cli`, designed to streamline Arduino project development. It provides an intuitive workspace with project management, real-time serial monitoring, and comprehensive board/library support.
 
 ### Key Features
 
@@ -67,7 +67,7 @@ V CLI is a professional Tkinter-based interface for `arduino-cli`, designed to s
 
 ```
 V cli/
-├── main.py                 # Tkinter UI (5 tabs)
+├── main_qt5.py             # Qt5 UI
 ├── cli_backend.py          # arduino-cli wrapper
 ├── cli.yaml               # CLI configuration
 ├── arduino-cli.exe        # arduino-cli executable
@@ -161,7 +161,7 @@ See LICENSE.txt file in the project root.
 
 ### Visão Geral
 
-V CLI é uma interface moderna baseada em Tkinter para `arduino-cli`, desenhada para otimizar o desenvolvimento de projetos Arduino. Oferece um ambiente de trabalho intuitivo com gerenciamento de projetos, monitoramento serial em tempo real e suporte abrangente para placas e bibliotecas.
+V CLI é uma interface moderna baseada em PyQt5 para `arduino-cli`, desenhada para otimizar o desenvolvimento de projetos Arduino. Oferece um ambiente de trabalho intuitivo com gerenciamento de projetos, monitoramento serial em tempo real e suporte abrangente para placas e bibliotecas.
 
 ### Características Principais
 
@@ -218,7 +218,7 @@ V CLI é uma interface moderna baseada em Tkinter para `arduino-cli`, desenhada 
 
 ```
 V cli/
-├── main.py                 # UI com Tkinter (5 abas)
+├── main_qt5.py             # UI com Qt5
 ├── cli_backend.py          # Arduino-cli wrapper
 ├── cli.yaml               # Configuração CLI
 ├── arduino-cli.exe        # Executável arduino-cli
@@ -313,7 +313,7 @@ Veja o arquivo LICENSE.txt na raiz do projeto.
 ## 📦 Dependências
 
 - Python 3.7+
-- tkinter (incluído)
+- PyQt5
 - pyserial (para monitor serial)
 - arduino-cli v0.20.0+
 
@@ -338,7 +338,7 @@ Isto:
 ## 📖 Arquivos Importantes
 
 - `cli_backend.py` - Operações CLI
-- `main.py` - Interface completa
+- `main_qt5.py` - Interface principal
 - `cli.yaml` - Configuração (auto-gerado)
 - `.recent_projects.json` - Histórico (auto-gerado)
 

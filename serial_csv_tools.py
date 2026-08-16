@@ -136,10 +136,12 @@ class SerialPlotWidget(QtWidgets.QWidget):
         self.series = {}
         self.selected_series = []
         self.plot_type = "line"
+        self.color_map = {}
 
-    def set_data(self, series: dict, selected_series=None, plot_type: str = "line"):
+    def set_data(self, series: dict, selected_series=None, plot_type: str = "line", color_map=None):
         self.series = series or {}
         self.plot_type = plot_type or "line"
+        self.color_map = dict(color_map or {})
         if selected_series is None:
             self.selected_series = list(self.series.keys())[:4]
         else:
@@ -187,7 +189,7 @@ class SerialPlotWidget(QtWidgets.QWidget):
 
         colors = ["#43aa8b", "#ffb703", "#8ecae6", "#fb8500", "#ff6b6b", "#b388eb"]
         for index, (name, points) in enumerate(visible):
-            color = QtGui.QColor(colors[index % len(colors)])
+            color = QtGui.QColor(self.color_map.get(name, colors[index % len(colors)]))
             pen = QtGui.QPen(color, 2)
             painter.setPen(pen)
             mapped = [to_screen(x_value, y_value) for x_value, y_value in points]
@@ -223,7 +225,7 @@ class SerialPlotWidget(QtWidgets.QWidget):
         legend_x = plot_rect.left()
         legend_y = self.height() - 18
         for index, (name, _) in enumerate(visible):
-            color = QtGui.QColor(colors[index % len(colors)])
+            color = QtGui.QColor(self.color_map.get(name, colors[index % len(colors)]))
             painter.fillRect(legend_x, legend_y - 8, 10, 10, color)
             painter.setPen(QtGui.QColor("#d7e3ee"))
             painter.drawText(legend_x + 14, legend_y, name)
@@ -329,6 +331,7 @@ class CsvLogViewerDialog(QtWidgets.QDialog):
         self.series = {}
         self.visible_records = []
         self.window_start = 0
+        self.series_colors = {}
         self.setWindowTitle(f"Leitor de Log CSV - {self.csv_path.name}")
         fit_dialog_to_screen(self, 1500, 920, min_width=1180, min_height=680)
         self._build_ui()
@@ -336,73 +339,41 @@ class CsvLogViewerDialog(QtWidgets.QDialog):
 
     def _build_ui(self):
         layout = QtWidgets.QVBoxLayout(self)
-        header = QtWidgets.QFrame()
-        header.setStyleSheet("QFrame { background: #edf4fb; border: 1px solid #d4e2f0; border-radius: 14px; }")
-        header_layout = QtWidgets.QHBoxLayout(header)
-        title_col = QtWidgets.QVBoxLayout()
+        top = QtWidgets.QHBoxLayout()
         self.title_label = QtWidgets.QLabel("Log CSV")
-        self.title_label.setStyleSheet("font-size: 20px; font-weight: 700; color: #17324d;")
+        self.title_label.setStyleSheet("font-size: 18px; font-weight: 700; color: #17324d;")
         self.clock_label = QtWidgets.QLabel("--:--:--")
-        self.clock_label.setStyleSheet("font-size: 28px; font-weight: 800; color: #219ebc;")
+        self.clock_label.setStyleSheet("font-size: 22px; font-weight: 800; color: #219ebc;")
         self.date_label = QtWidgets.QLabel("--/--/----")
         self.date_label.setStyleSheet("font-size: 12px; color: #5b7288;")
-        title_col.addWidget(self.title_label)
-        title_col.addWidget(self.clock_label)
-        title_col.addWidget(self.date_label)
-        header_layout.addLayout(title_col, 1)
-
-        chips_col = QtWidgets.QHBoxLayout()
-        self.duration_chip = QtWidgets.QLabel("Duração --")
-        self.rows_chip = QtWidgets.QLabel("Linhas --")
-        self.errors_chip = QtWidgets.QLabel("Erros --")
-        for chip in [self.duration_chip, self.rows_chip, self.errors_chip]:
-            chip.setStyleSheet("padding: 8px 12px; background: white; border: 1px solid #d1dde9; border-radius: 10px; font-weight: 600; color: #29435c;")
-            chips_col.addWidget(chip)
-        header_layout.addLayout(chips_col)
-        layout.addWidget(header)
-
-        self.timeline = TimelineWidget()
-        layout.addWidget(self.timeline)
+        self.window_label = QtWidgets.QLabel("Janela: --")
+        self.window_label.setStyleSheet("font-size: 12px; color: #5b7288;")
+        top.addWidget(self.title_label)
+        top.addStretch(1)
+        top.addWidget(self.window_label)
+        top.addSpacing(14)
+        top.addWidget(self.clock_label)
+        top.addSpacing(8)
+        top.addWidget(self.date_label)
+        layout.addLayout(top)
 
         controls = QtWidgets.QHBoxLayout()
         self.plot_type_combo = QtWidgets.QComboBox()
         self.plot_type_combo.addItems(["line", "step", "scatter", "bar"])
-        self.point_limit_spin = QtWidgets.QSpinBox()
-        self.point_limit_spin.setRange(10, 5000)
-        self.point_limit_spin.setSingleStep(10)
-        self.point_limit_spin.setValue(120)
         self.prev_btn = QtWidgets.QPushButton("<< Voltar")
         self.next_btn = QtWidgets.QPushButton("Avançar >>")
         controls.addWidget(QtWidgets.QLabel("Plot:"))
         controls.addWidget(self.plot_type_combo)
-        controls.addWidget(QtWidgets.QLabel("Pontos na janela:"))
-        controls.addWidget(self.point_limit_spin)
         controls.addWidget(self.prev_btn)
         controls.addWidget(self.next_btn)
         controls.addStretch(1)
         layout.addLayout(controls)
 
-        nav = QtWidgets.QHBoxLayout()
-        self.window_label = QtWidgets.QLabel("Janela: --")
-        self.offset_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-        self.offset_slider.setRange(0, 0)
-        nav.addWidget(self.window_label)
-        nav.addWidget(self.offset_slider, 1)
-        layout.addLayout(nav)
-
         splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
         layout.addWidget(splitter, 1)
 
-        left = QtWidgets.QWidget()
-        left_layout = QtWidgets.QVBoxLayout(left)
-        self.series_list = QtWidgets.QListWidget()
-        self.series_list.itemChanged.connect(self._refresh_plot)
-        self.series_list.setMinimumWidth(240)
         self.plot = SerialPlotWidget()
-        left_layout.addWidget(QtWidgets.QLabel("Séries"))
-        left_layout.addWidget(self.series_list)
-        left_layout.addWidget(self.plot, 1)
-        splitter.addWidget(left)
+        splitter.addWidget(self.plot)
 
         right = QtWidgets.QTabWidget()
         self.table = QtWidgets.QTableWidget(0, 0)
@@ -413,15 +384,70 @@ class CsvLogViewerDialog(QtWidgets.QDialog):
         self.errors = QtWidgets.QPlainTextEdit()
         self.errors.setReadOnly(True)
         right.addTab(self.errors, "Erros")
+
+        view_tab = QtWidgets.QWidget()
+        view_layout = QtWidgets.QVBoxLayout(view_tab)
+        limit_row = QtWidgets.QHBoxLayout()
+        self.point_limit_spin = QtWidgets.QSpinBox()
+        self.point_limit_spin.setRange(10, 5000)
+        self.point_limit_spin.setSingleStep(10)
+        self.point_limit_spin.setValue(120)
+        self.visible_vars_spin = QtWidgets.QSpinBox()
+        self.visible_vars_spin.setRange(1, 12)
+        self.visible_vars_spin.setValue(4)
+        self.auto_vars_btn = QtWidgets.QPushButton("Aplicar variáveis")
+        self.normalize_check = QtWidgets.QCheckBox("Equalizar séries")
+        self.split_check = QtWidgets.QCheckBox("Dividir variáveis")
+        self.stack_step_spin = QtWidgets.QDoubleSpinBox()
+        self.stack_step_spin.setRange(0.1, 10.0)
+        self.stack_step_spin.setSingleStep(0.1)
+        self.stack_step_spin.setValue(1.5)
+        self.stack_step_spin.setEnabled(False)
+        limit_row.addWidget(QtWidgets.QLabel("Pontos na janela:"))
+        limit_row.addWidget(self.point_limit_spin)
+        limit_row.addWidget(QtWidgets.QLabel("Variáveis exibidas:"))
+        limit_row.addWidget(self.visible_vars_spin)
+        limit_row.addWidget(self.auto_vars_btn)
+        limit_row.addWidget(self.normalize_check)
+        limit_row.addWidget(self.split_check)
+        limit_row.addWidget(QtWidgets.QLabel("Passo:"))
+        limit_row.addWidget(self.stack_step_spin)
+        limit_row.addStretch(1)
+        view_layout.addLayout(limit_row)
+        self.series_list = QtWidgets.QListWidget()
+        self.series_list.itemChanged.connect(self._refresh_plot)
+        view_layout.addWidget(self.series_list, 1)
+        color_row = QtWidgets.QHBoxLayout()
+        self.color_btn = QtWidgets.QPushButton("Mudar cor")
+        self.export_excel_btn = QtWidgets.QPushButton("Exportar Excel")
+        color_row.addWidget(self.color_btn)
+        color_row.addWidget(self.export_excel_btn)
+        color_row.addStretch(1)
+        view_layout.addLayout(color_row)
+        right.addTab(view_tab, "Exibir")
         splitter.addWidget(right)
-        splitter.setStretchFactor(0, 3)
-        splitter.setStretchFactor(1, 2)
+        splitter.setStretchFactor(0, 5)
+        splitter.setStretchFactor(1, 3)
+
+        nav = QtWidgets.QHBoxLayout()
+        self.offset_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.offset_slider.setRange(0, 0)
+        nav.addWidget(QtWidgets.QLabel("Timeline"))
+        nav.addWidget(self.offset_slider, 1)
+        layout.addLayout(nav)
 
         self.plot_type_combo.currentTextChanged.connect(self._refresh_plot)
         self.point_limit_spin.valueChanged.connect(self._rebuild_visible_window)
         self.prev_btn.clicked.connect(self._step_back)
         self.next_btn.clicked.connect(self._step_forward)
         self.offset_slider.valueChanged.connect(self._slider_changed)
+        self.auto_vars_btn.clicked.connect(self._apply_variable_limit)
+        self.visible_vars_spin.valueChanged.connect(self._apply_variable_limit)
+        self.color_btn.clicked.connect(self._change_series_color)
+        self.export_excel_btn.clicked.connect(self._export_excel)
+        self.normalize_check.toggled.connect(self._refresh_plot)
+        self.split_check.toggled.connect(self._toggle_split_mode)
+        self.stack_step_spin.valueChanged.connect(self._refresh_plot)
 
     def _load(self):
         try:
@@ -437,13 +463,14 @@ class CsvLogViewerDialog(QtWidgets.QDialog):
                 self.meta = json.loads(self.meta_path.read_text(encoding="utf-8"))
             except Exception:
                 self.meta = {}
-        errors = [row for row in self.records if str(row.get("error_flag", "")).lower() in {"1", "true", "yes"}]
         self.series = extract_numeric_series(self.records)
+        default_colors = ["#43aa8b", "#ffb703", "#8ecae6", "#fb8500", "#ff6b6b", "#b388eb", "#00b4d8", "#90be6d"]
         for name in self.series.keys():
             item = QtWidgets.QListWidgetItem(name)
             item.setFlags(item.flags() | QtCore.Qt.ItemIsUserCheckable)
             item.setCheckState(QtCore.Qt.Unchecked)
             self.series_list.addItem(item)
+            self.series_colors[name] = default_colors[len(self.series_colors) % len(default_colors)]
         started = self.meta.get("started_at") or (self.records[0].get("timestamp") if self.records else "")
         dt_obj = None
         try:
@@ -457,10 +484,6 @@ class CsvLogViewerDialog(QtWidgets.QDialog):
         else:
             self.clock_label.setText("--:--:--")
             self.date_label.setText(self.csv_path.name)
-        max_elapsed = max((safe_float(row.get("elapsed_ms")) or 0 for row in self.records), default=0)
-        self.duration_chip.setText(f"Duração {format_duration_ms(max_elapsed)}")
-        self.rows_chip.setText(f"Linhas {len(self.records)}")
-        self.errors_chip.setText(f"Erros {len(errors)}")
         self._check_default_series()
         self._rebuild_visible_window()
 
@@ -471,8 +494,55 @@ class CsvLogViewerDialog(QtWidgets.QDialog):
             item.setCheckState(QtCore.Qt.Checked if index < 4 else QtCore.Qt.Unchecked)
         self.series_list.blockSignals(False)
 
+    def _apply_variable_limit(self):
+        limit = self.visible_vars_spin.value()
+        checked = 0
+        self.series_list.blockSignals(True)
+        for index in range(self.series_list.count()):
+            item = self.series_list.item(index)
+            if checked < limit:
+                item.setCheckState(QtCore.Qt.Checked)
+                checked += 1
+            else:
+                item.setCheckState(QtCore.Qt.Unchecked)
+        self.series_list.blockSignals(False)
+        self._refresh_plot()
+
+    def _change_series_color(self):
+        item = self.series_list.currentItem()
+        if not item:
+            QtWidgets.QMessageBox.information(self, "Exibir", "Selecione uma variável na aba Exibir.")
+            return
+        current = QtGui.QColor(self.series_colors.get(item.text(), "#43aa8b"))
+        color = QtWidgets.QColorDialog.getColor(current, self, f"Cor de {item.text()}")
+        if color.isValid():
+            self.series_colors[item.text()] = color.name()
+            self._refresh_plot()
+
+    def _export_excel(self):
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Exportar Excel", str(self.csv_path.with_suffix(".xls")), "Excel (*.xls)")
+        if not path:
+            return
+        headers = list(self.records[0].keys()) if self.records else []
+        rows = self.visible_records
+        html = [
+            "<html><head><meta charset='utf-8'></head><body><table border='1'><tr>",
+            *[f"<th>{header}</th>" for header in headers],
+            "</tr>",
+        ]
+        for row in rows:
+            html.append("<tr>")
+            html.extend(f"<td>{str(row.get(header, ''))}</td>" for header in headers)
+            html.append("</tr>")
+        html.append("</table></body></html>")
+        Path(path).write_text("".join(html), encoding="utf-8")
+
     def _window_end(self):
         return min(len(self.records), self.window_start + self.point_limit_spin.value())
+
+    def _toggle_split_mode(self, checked: bool):
+        self.stack_step_spin.setEnabled(bool(checked))
+        self._refresh_plot()
 
     def _slider_changed(self, value: int):
         self.window_start = max(0, int(value))
@@ -492,7 +562,6 @@ class CsvLogViewerDialog(QtWidgets.QDialog):
     def _rebuild_visible_window(self, refresh_slider: bool = True):
         if not self.records:
             self.visible_records = []
-            self.timeline.set_records([])
             return
         max_start = max(0, len(self.records) - self.point_limit_spin.value())
         self.window_start = min(max(self.window_start, 0), max_start)
@@ -509,7 +578,6 @@ class CsvLogViewerDialog(QtWidgets.QDialog):
             f"Janela {self.window_start + 1}-{end_index} de {len(self.records)} | "
             f"{format_duration_ms(first_elapsed)} -> {format_duration_ms(last_elapsed)}"
         )
-        self.timeline.set_records(self.records, self.window_start, end_index)
         self._refresh_table()
         self._refresh_errors()
         self._refresh_plot()
@@ -539,18 +607,30 @@ class CsvLogViewerDialog(QtWidgets.QDialog):
             item = self.series_list.item(index)
             if item.checkState() == QtCore.Qt.Checked:
                 selected.append(item.text())
-        self.plot.set_data(
-            extract_numeric_series(self.visible_records),
-            selected_series=selected,
-            plot_type=self.plot_type_combo.currentText(),
-        )
+        series = extract_numeric_series(self.visible_records)
+        if self.normalize_check.isChecked() or self.split_check.isChecked():
+            transformed = {}
+            step = self.stack_step_spin.value()
+            for idx, name in enumerate(selected):
+                points = series.get(name, [])
+                if not points:
+                    continue
+                ys = [p[1] for p in points]
+                min_y, max_y = min(ys), max(ys)
+                span = max(max_y - min_y, 1e-9)
+                offset = idx * step if self.split_check.isChecked() else 0.0
+                transformed[name] = [(x, ((y - min_y) / span) + offset) for x, y in points]
+            for name, points in series.items():
+                if name not in transformed:
+                    transformed[name] = points
+            series = transformed
+        self.plot.set_data(series, selected_series=selected, plot_type=self.plot_type_combo.currentText(), color_map=self.series_colors)
 
 
 class CsvLogBrowserDialog(QtWidgets.QDialog):
     def __init__(self, parent, logs_dir: Path):
         super().__init__(parent)
         self.logs_dir = Path(logs_dir)
-        self.logs_dir.mkdir(parents=True, exist_ok=True)
         self.setWindowTitle("Ler Log CSV")
         fit_dialog_to_screen(self, 1380, 860, min_width=1040, min_height=620)
         self._build_ui()
@@ -558,121 +638,50 @@ class CsvLogBrowserDialog(QtWidgets.QDialog):
 
     def _build_ui(self):
         layout = QtWidgets.QVBoxLayout(self)
-        header = QtWidgets.QFrame()
-        header.setStyleSheet("QFrame { background: #edf4fb; border: 1px solid #d4e2f0; border-radius: 14px; }")
-        header_layout = QtWidgets.QHBoxLayout(header)
-        text_col = QtWidgets.QVBoxLayout()
-        title = QtWidgets.QLabel("Leitor de Log CSV")
-        title.setStyleSheet("font-size: 20px; font-weight: 700; color: #17324d;")
-        subtitle = QtWidgets.QLabel(str(self.logs_dir))
-        subtitle.setStyleSheet("font-size: 12px; color: #6c8399;")
-        text_col.addWidget(title)
-        text_col.addWidget(subtitle)
-        header_layout.addLayout(text_col, 1)
-        self.external_btn = QtWidgets.QPushButton("Abrir arquivo externo")
-        header_layout.addWidget(self.external_btn)
-        layout.addWidget(header)
-
-        splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
-        layout.addWidget(splitter, 1)
-
-        left = QtWidgets.QWidget()
-        left_layout = QtWidgets.QVBoxLayout(left)
+        title = QtWidgets.QLabel(str(self.logs_dir))
+        title.setStyleSheet("font-size: 12px; color: #6c8399;")
+        layout.addWidget(title)
         actions = QtWidgets.QHBoxLayout()
         self.refresh_btn = QtWidgets.QPushButton("Atualizar lista")
         self.open_btn = QtWidgets.QPushButton("Abrir log")
         actions.addWidget(self.refresh_btn)
         actions.addWidget(self.open_btn)
-        left_layout.addLayout(actions)
-
-        self.list_widget = QtWidgets.QListWidget()
-        self.list_widget.itemDoubleClicked.connect(lambda *_: self._open_selected())
-        left_layout.addWidget(self.list_widget, 1)
-        splitter.addWidget(left)
-
-        right = QtWidgets.QWidget()
-        right_layout = QtWidgets.QVBoxLayout(right)
-        cards = QtWidgets.QHBoxLayout()
-        self.file_chip = QtWidgets.QLabel("Arquivo --")
-        self.rows_chip = QtWidgets.QLabel("Linhas --")
-        self.errors_chip = QtWidgets.QLabel("Erros --")
-        for chip in [self.file_chip, self.rows_chip, self.errors_chip]:
-            chip.setStyleSheet("padding: 10px 12px; background: #f8fbfe; border: 1px solid #d1dde9; border-radius: 10px; font-weight: 600; color: #29435c;")
-            cards.addWidget(chip)
-        right_layout.addLayout(cards)
-
-        self.timeline = TimelineWidget()
-        right_layout.addWidget(self.timeline)
-
-        self.info = QtWidgets.QPlainTextEdit()
-        self.info.setReadOnly(True)
-        right_layout.addWidget(self.info, 1)
-        splitter.addWidget(right)
-        splitter.setStretchFactor(0, 2)
-        splitter.setStretchFactor(1, 3)
+        actions.addStretch(1)
+        layout.addLayout(actions)
+        self.list_table = QtWidgets.QTableWidget(0, 3)
+        self.list_table.setHorizontalHeaderLabels(["Arquivo", "Data", "Tamanho"])
+        self.list_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.list_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.list_table.horizontalHeader().setSectionResizeMode(0, QtWidgets.QHeaderView.Stretch)
+        self.list_table.horizontalHeader().setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeToContents)
+        self.list_table.horizontalHeader().setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeToContents)
+        self.list_table.itemDoubleClicked.connect(lambda *_: self._open_selected())
+        layout.addWidget(self.list_table, 1)
 
         self.refresh_btn.clicked.connect(self._load_logs)
         self.open_btn.clicked.connect(self._open_selected)
-        self.external_btn.clicked.connect(self._open_external)
-        self.list_widget.currentItemChanged.connect(lambda *_: self._update_info())
 
     def _load_logs(self):
-        self.list_widget.clear()
-        files = sorted(self.logs_dir.glob("*.csv"), key=lambda item: item.stat().st_mtime, reverse=True)
-        for csv_path in files:
-            item = QtWidgets.QListWidgetItem(csv_path.name)
-            item.setData(QtCore.Qt.UserRole, str(csv_path))
-            self.list_widget.addItem(item)
-        if self.list_widget.count():
-            self.list_widget.setCurrentRow(0)
-        else:
-            self.info.setPlainText("Nenhum log CSV encontrado na pasta do projeto.")
-
-    def _update_info(self):
-        item = self.list_widget.currentItem()
-        if not item:
-            self.info.setPlainText("Selecione um log para ver o resumo.")
-            return
-        csv_path = Path(item.data(QtCore.Qt.UserRole))
-        meta_path = csv_path.with_suffix(".meta.json")
-        info_lines = [
-            f"Arquivo: {csv_path.name}",
-            f"Modificado: {datetime.fromtimestamp(csv_path.stat().st_mtime).strftime('%d/%m/%Y %H:%M:%S')}",
-            f"Tamanho: {csv_path.stat().st_size} bytes",
-        ]
-        records = []
-        try:
-            with open(csv_path, "r", encoding="utf-8-sig", newline="") as handle:
-                records = list(csv.DictReader(handle))
-        except Exception:
-            records = []
-        if meta_path.exists():
-            try:
-                meta = json.loads(meta_path.read_text(encoding="utf-8"))
-                if meta.get("row_count") is not None:
-                    info_lines.append(f"Linhas: {meta['row_count']}")
-                if meta.get("error_count") is not None:
-                    info_lines.append(f"Erros: {meta['error_count']}")
-            except Exception:
-                info_lines.append("Meta: falha ao ler metadados.")
-        max_elapsed = max((safe_float(row.get("elapsed_ms")) or 0 for row in records), default=0)
-        self.file_chip.setText(f"Arquivo {csv_path.stem}")
-        self.rows_chip.setText(f"Linhas {len(records)}")
-        self.errors_chip.setText(f"Erros {sum(1 for row in records if str(row.get('error_flag', '')).lower() in {'1', 'true', 'yes'})}")
-        self.timeline.set_records(records)
-        self.info.setPlainText("\n".join(info_lines))
+        files = sorted(self.logs_dir.glob("*.csv"), key=lambda item: item.stat().st_mtime, reverse=True) if self.logs_dir.exists() else []
+        self.list_table.setRowCount(len(files))
+        for row_index, csv_path in enumerate(files):
+            name_item = QtWidgets.QTableWidgetItem(csv_path.name)
+            name_item.setData(QtCore.Qt.UserRole, str(csv_path))
+            date_item = QtWidgets.QTableWidgetItem(datetime.fromtimestamp(csv_path.stat().st_mtime).strftime("%d/%m/%Y %H:%M"))
+            size_item = QtWidgets.QTableWidgetItem(f"{csv_path.stat().st_size} B")
+            self.list_table.setItem(row_index, 0, name_item)
+            self.list_table.setItem(row_index, 1, date_item)
+            self.list_table.setItem(row_index, 2, size_item)
+        if files:
+            self.list_table.selectRow(0)
 
     def _open_selected(self):
-        item = self.list_widget.currentItem()
-        if not item:
+        row = self.list_table.currentRow()
+        if row < 0:
             QtWidgets.QMessageBox.information(self, "Ler Log CSV", "Selecione um log da lista.")
             return
-        dialog = CsvLogViewerDialog(self, Path(item.data(QtCore.Qt.UserRole)))
-        dialog.exec_()
-
-    def _open_external(self):
-        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Abrir arquivo externo", str(self.logs_dir), "CSV (*.csv)")
-        if not path:
-            return
-        dialog = CsvLogViewerDialog(self, Path(path))
-        dialog.exec_()
+        item = self.list_table.item(row, 0)
+        path = Path(item.data(QtCore.Qt.UserRole))
+        parent = self.parentWidget()
+        self.accept()
+        QtCore.QTimer.singleShot(0, lambda: CsvLogViewerDialog(parent, path).exec_())

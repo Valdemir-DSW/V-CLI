@@ -19,6 +19,7 @@ from cli_backend import CLIBackend
 from code_editor_tools import CodeEditorDialog
 from serial_csv_tools import (
     CsvLogBrowserDialog,
+    CsvLogViewerDialog,
     RecordingSaveDialog,
     SerialPlotWidget,
     extract_numeric_series,
@@ -1107,13 +1108,15 @@ class VCliQtApp(QtWidgets.QMainWindow):
         tools_menu = menu_bar.addMenu("Ferramentas")
         settings_action = QtWidgets.QAction("Configurações", self)
         about_action = QtWidgets.QAction("About", self)
-        self.action_open_csv_log = QtWidgets.QAction("Ler Log CSV", self)
+        self.action_open_csv_log = QtWidgets.QAction("Lista de logs do projeto", self)
+        self.action_open_external_log = QtWidgets.QAction("Abrir log externo", self)
         self.action_code_editor = QtWidgets.QAction("Code Editor", self)
         link_arduino = QtWidgets.QAction("Arduino CLI", self)
         link_python = QtWidgets.QAction("Python", self)
         link_pyqt = QtWidgets.QAction("PyQt5", self)
         link_vscode = QtWidgets.QAction("VS Code", self)
         tools_menu.addAction(self.action_open_csv_log)
+        tools_menu.addAction(self.action_open_external_log)
         tools_menu.addAction(self.action_code_editor)
         vcli_menu.addAction(settings_action)
         vcli_menu.addAction(about_action)
@@ -1132,6 +1135,7 @@ class VCliQtApp(QtWidgets.QMainWindow):
         self.action_export.triggered.connect(self.export_binary)
         self.action_properties.triggered.connect(self.edit_project_properties)
         self.action_open_csv_log.triggered.connect(self.open_csv_log_viewer)
+        self.action_open_external_log.triggered.connect(self.open_external_csv_log_viewer)
         self.action_code_editor.triggered.connect(self.open_code_editor_dialog)
         settings_action.triggered.connect(self.open_settings_dialog)
         about_action.triggered.connect(self.show_about_dialog)
@@ -2501,34 +2505,52 @@ class VCliQtApp(QtWidgets.QMainWindow):
     def show_about_dialog(self):
         dialog = QtWidgets.QDialog(self)
         dialog.setWindowTitle("About V CLI")
-        self.fit_dialog_to_screen(dialog, 640, 420)
+        self.fit_dialog_to_screen(dialog, 820, 620)
         layout = QtWidgets.QVBoxLayout(dialog)
+        hero = QtWidgets.QFrame()
+        hero.setStyleSheet("QFrame { background: qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 #edf6ff, stop:1 #d8ebff); border: 1px solid #c9ddf5; border-radius: 16px; }")
+        hero_layout = QtWidgets.QHBoxLayout(hero)
+        icon_label = QtWidgets.QLabel()
+        pixmap = QtGui.QPixmap(str(self.app_icon_path))
+        if not pixmap.isNull():
+            icon_label.setPixmap(pixmap.scaled(92, 92, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation))
+        icon_label.setMinimumWidth(110)
+        hero_layout.addWidget(icon_label)
+        text_col = QtWidgets.QVBoxLayout()
         title = QtWidgets.QLabel("V CLI")
-        title.setObjectName("managerTitle")
-        subtitle = QtWidgets.QLabel("Interface Qt 5 para arduino-cli")
+        title.setStyleSheet("font-size: 28px; font-weight: 800; color: #17324d;")
+        subtitle = QtWidgets.QLabel("Interface Qt5 para arduino-cli com serial, logs CSV e editor integrado")
         subtitle.setStyleSheet("font-size: 13px; color: #4b5563;")
-        info = QtWidgets.QLabel(
+        text_col.addWidget(title)
+        text_col.addWidget(subtitle)
+        hero_layout.addLayout(text_col, 1)
+        layout.addWidget(hero)
+
+        tech = QtWidgets.QLabel(
             "Tecnologias principais:\n"
-            "- Python\n"
-            "- PyQt5\n"
-            "- Arduino CLI\n"
-            "- VS Code\n"
+            "Python 3 • PyQt5 • Arduino CLI • VS Code • pyserial"
         )
-        info.setWordWrap(True)
-        links = QtWidgets.QLabel(
-            '<a href="https://arduino.github.io/arduino-cli/latest/">Arduino CLI</a><br>'
-            '<a href="https://www.python.org/">Python</a><br>'
-            '<a href="https://pypi.org/project/PyQt5/">PyQt5</a><br>'
-            '<a href="https://code.visualstudio.com/">VS Code</a>'
+        tech.setWordWrap(True)
+        tech.setStyleSheet("padding: 10px 12px; background: #f7fbff; border: 1px solid #d7e6f3; border-radius: 12px;")
+        layout.addWidget(tech)
+
+        licenses = QtWidgets.QTextBrowser()
+        licenses.setOpenExternalLinks(True)
+        licenses.setHtml(
+            "<h3 style='color:#17324d'>Licenças e links</h3>"
+            "<ul>"
+            "<li><b>Python</b>: PSF License - <a href='https://www.python.org/'>python.org</a></li>"
+            "<li><b>PyQt5</b>: GPL/comercial (bindings Qt for Python) - <a href='https://pypi.org/project/PyQt5/'>PyQt5</a></li>"
+            "<li><b>Qt</b>: LGPL/GPL/comercial - <a href='https://www.qt.io/'>qt.io</a></li>"
+            "<li><b>Arduino CLI</b>: GPL v3 - <a href='https://arduino.github.io/arduino-cli/latest/'>arduino-cli</a></li>"
+            "<li><b>VS Code</b>: licença Microsoft - <a href='https://code.visualstudio.com/'>VS Code</a></li>"
+            "<li><b>pyserial</b>: BSD-style - <a href='https://pypi.org/project/pyserial/'>pyserial</a></li>"
+            "</ul>"
         )
-        links.setOpenExternalLinks(True)
+        licenses.setMinimumHeight(260)
         buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok)
         buttons.accepted.connect(dialog.accept)
-        layout.addWidget(title)
-        layout.addWidget(subtitle)
-        layout.addSpacing(8)
-        layout.addWidget(info)
-        layout.addWidget(links)
+        layout.addWidget(licenses, 1)
         layout.addStretch(1)
         layout.addWidget(buttons)
         dialog.exec_()
@@ -3008,10 +3030,11 @@ class VCliQtApp(QtWidgets.QMainWindow):
         self._set_combo_value(self.port_combo, current)
         self.port_combo.blockSignals(False)
 
-    def _serial_logs_dir(self) -> Path:
+    def _serial_logs_dir(self, create: bool = False) -> Path:
         base = self.current_project if self.current_project else Path.cwd()
         logs_dir = base / "logs"
-        logs_dir.mkdir(parents=True, exist_ok=True)
+        if create:
+            logs_dir.mkdir(parents=True, exist_ok=True)
         return logs_dir
 
     def _sync_serial_decode_mode(self, text: str):
@@ -3099,7 +3122,7 @@ class VCliQtApp(QtWidgets.QMainWindow):
     def start_serial_recording(self):
         if self.serial_recording_active:
             return
-        logs_dir = self._serial_logs_dir()
+        logs_dir = self._serial_logs_dir(create=True)
         session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
         temp_path = logs_dir / f".recording_{session_id}.jsonl"
         self.serial_recording_session = {
@@ -3166,7 +3189,7 @@ class VCliQtApp(QtWidgets.QMainWindow):
                 if key not in {"event_type", "timestamp", "date", "time", "elapsed_ms", "rx_fps", "line_index", "error_flag", "error_message", "raw"} and key not in csv_headers:
                     csv_headers.append(key)
         final_name = self._sanitize_log_name(name)
-        logs_dir = self._serial_logs_dir()
+        logs_dir = self._serial_logs_dir(create=True)
         csv_path = logs_dir / f"{final_name}.csv"
         meta_path = logs_dir / f"{final_name}.meta.json"
         fieldnames = ["event_type", "timestamp", "date", "time", "elapsed_ms", "rx_fps", "line_index", "error_flag", "error_message", "raw"] + csv_headers
@@ -3195,7 +3218,16 @@ class VCliQtApp(QtWidgets.QMainWindow):
         self.serial_recording_session = None
 
     def open_csv_log_viewer(self):
-        dialog = CsvLogBrowserDialog(self, self._serial_logs_dir())
+        dialog = CsvLogBrowserDialog(self, self._serial_logs_dir(create=False))
+        dialog.exec_()
+
+    def open_external_csv_log_viewer(self):
+        logs_dir = self._serial_logs_dir(create=False)
+        start_dir = str(logs_dir if logs_dir.exists() else (self.current_project or Path.cwd()))
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Abrir log externo", start_dir, "CSV (*.csv)")
+        if not path:
+            return
+        dialog = CsvLogViewerDialog(self, Path(path))
         dialog.exec_()
 
     def open_code_editor_dialog(self):

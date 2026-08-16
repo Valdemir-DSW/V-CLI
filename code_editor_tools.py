@@ -17,9 +17,14 @@ class SimpleCodeHighlighter(QtGui.QSyntaxHighlighter):
         super().__init__(document)
         self.rules = []
 
-        keyword_format = QtGui.QTextCharFormat()
-        keyword_format.setForeground(QtGui.QColor("#7c4dff"))
-        keyword_format.setFontWeight(QtGui.QFont.Bold)
+        def make_format(color: str, bold: bool = False):
+            fmt = QtGui.QTextCharFormat()
+            fmt.setForeground(QtGui.QColor(color))
+            if bold:
+                fmt.setFontWeight(QtGui.QFont.Bold)
+            return fmt
+
+        keyword_format = make_format("#7c4dff", True)
         keywords = [
             "class", "def", "return", "if", "else", "elif", "for", "while", "try", "except",
             "finally", "import", "from", "as", "with", "pass", "break", "continue", "True", "False", "None",
@@ -29,24 +34,12 @@ class SimpleCodeHighlighter(QtGui.QSyntaxHighlighter):
         for word in keywords:
             self.rules.append((re.compile(rf"\b{re.escape(word)}\b"), keyword_format))
 
-        string_format = QtGui.QTextCharFormat()
-        string_format.setForeground(QtGui.QColor("#0f9d58"))
-        self.rules.append((re.compile(r'"[^"\\]*(?:\\.[^"\\]*)*"'), string_format))
-        self.rules.append((re.compile(r"'[^'\\]*(?:\\.[^'\\]*)*'"), string_format))
-
-        comment_format = QtGui.QTextCharFormat()
-        comment_format.setForeground(QtGui.QColor("#7f8c8d"))
-        self.rules.append((re.compile(r"#.*$"), comment_format))
-        self.rules.append((re.compile(r"//.*$"), comment_format))
-
-        number_format = QtGui.QTextCharFormat()
-        number_format.setForeground(QtGui.QColor("#d35400"))
-        self.rules.append((re.compile(r"\b\d+(?:\.\d+)?\b"), number_format))
-
-        func_format = QtGui.QTextCharFormat()
-        func_format.setForeground(QtGui.QColor("#1565c0"))
-        func_format.setFontWeight(QtGui.QFont.Bold)
-        self.rules.append((re.compile(r"\b[A-Za-z_]\w*(?=\s*\()"), func_format))
+        self.rules.append((re.compile(r'"[^"\\]*(?:\\.[^"\\]*)*"'), make_format("#0f9d58")))
+        self.rules.append((re.compile(r"'[^'\\]*(?:\\.[^'\\]*)*'"), make_format("#0f9d58")))
+        self.rules.append((re.compile(r"#.*$"), make_format("#7f8c8d")))
+        self.rules.append((re.compile(r"//.*$"), make_format("#7f8c8d")))
+        self.rules.append((re.compile(r"\b\d+(?:\.\d+)?\b"), make_format("#d35400")))
+        self.rules.append((re.compile(r"\b[A-Za-z_]\w*(?=\s*\()"), make_format("#1565c0", True)))
 
     def highlightBlock(self, text):
         for pattern, fmt in self.rules:
@@ -55,13 +48,165 @@ class SimpleCodeHighlighter(QtGui.QSyntaxHighlighter):
                 self.setFormat(start, end - start, fmt)
 
 
+class GutterArea(QtWidgets.QWidget):
+    def __init__(self, editor):
+        super().__init__(editor)
+        self.editor = editor
+
+    def sizeHint(self):
+        return QtCore.QSize(self.editor.gutter_width(), 0)
+
+    def paintEvent(self, event):
+        self.editor.paint_gutter(event)
+
+    def mousePressEvent(self, event):
+        self.editor.handle_gutter_click(event.pos())
+
+
+class FoldableCodeEditor(QtWidgets.QPlainTextEdit):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.gutter = GutterArea(self)
+        self.fold_regions = {}
+        self.folded_starts = set()
+        self.block_indent_cache = {}
+        self.blockCountChanged.connect(self._update_gutter_width)
+        self.updateRequest.connect(self._update_gutter_area)
+        self.cursorPositionChanged.connect(self._highlight_current_line)
+        self._update_gutter_width(0)
+        self._highlight_current_line()
+
+    def gutter_width(self):
+        digits = len(str(max(1, self.blockCount())))
+        return 34 + self.fontMetrics().horizontalAdvance("9") * digits
+
+    def _update_gutter_width(self, _):
+        self.setViewportMargins(self.gutter_width(), 0, 0, 0)
+
+    def _update_gutter_area(self, rect, dy):
+        if dy:
+            self.gutter.scroll(0, dy)
+        else:
+            self.gutter.update(0, rect.y(), self.gutter.width(), rect.height())
+        if rect.contains(self.viewport().rect()):
+            self._update_gutter_width(0)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        cr = self.contentsRect()
+        self.gutter.setGeometry(QtCore.QRect(cr.left(), cr.top(), self.gutter_width(), cr.height()))
+
+    def _highlight_current_line(self):
+        extra = []
+        if not self.isReadOnly():
+            selection = QtWidgets.QTextEdit.ExtraSelection()
+            selection.format.setBackground(QtGui.QColor("#eef6ff"))
+            selection.format.setProperty(QtGui.QTextFormat.FullWidthSelection, True)
+            selection.cursor = self.textCursor()
+            selection.cursor.clearSelection()
+            extra.append(selection)
+        self.setExtraSelections(extra)
+
+    def rebuild_fold_regions(self):
+        self.fold_regions = {}
+        self.block_indent_cache = {}
+        lines = self.toPlainText().splitlines()
+        stack = []
+        for idx, line in enumerate(lines):
+            stripped = line.strip()
+            indent = len(line) - len(line.lstrip(" \t"))
+            self.block_indent_cache[idx] = indent
+            while stack and indent <= stack[-1][1] and stripped:
+                start_idx, _ = stack.pop()
+                if idx - 1 > start_idx:
+                    self.fold_regions[start_idx] = idx - 1
+            if stripped.endswith("{") or re.match(r"^\s*(class|def)\s+\w+", line) or re.match(r"^\s*(if|else|elif|for|while|try|except|finally)\b.*:\s*$", line):
+                stack.append((idx, indent))
+        last_line = len(lines) - 1
+        while stack:
+            start_idx, _ = stack.pop()
+            if last_line > start_idx:
+                self.fold_regions[start_idx] = last_line
+        self._apply_fold_state()
+        self.gutter.update()
+
+    def _apply_fold_state(self):
+        doc = self.document()
+        for start, end in self.fold_regions.items():
+            hide = start in self.folded_starts
+            for line_no in range(start + 1, end + 1):
+                block = doc.findBlockByLineNumber(line_no)
+                if block.isValid():
+                    block.setVisible(not hide)
+                    block.setLineCount(1 if not hide else 0)
+        doc.markContentsDirty(0, doc.characterCount())
+        self.viewport().update()
+
+    def toggle_fold(self, start_line: int):
+        if start_line not in self.fold_regions:
+            return
+        if start_line in self.folded_starts:
+            self.folded_starts.remove(start_line)
+        else:
+            self.folded_starts.add(start_line)
+        self._apply_fold_state()
+        self.gutter.update()
+
+    def paint_gutter(self, event):
+        painter = QtGui.QPainter(self.gutter)
+        painter.fillRect(event.rect(), QtGui.QColor("#f2f5f8"))
+        block = self.firstVisibleBlock()
+        block_number = block.blockNumber()
+        top = int(self.blockBoundingGeometry(block).translated(self.contentOffset()).top())
+        bottom = top + int(self.blockBoundingRect(block).height())
+        current_line = self.textCursor().blockNumber()
+
+        while block.isValid() and top <= event.rect().bottom():
+            if block.isVisible() and bottom >= event.rect().top():
+                line_no = block_number + 1
+                if block_number == current_line:
+                    painter.fillRect(0, top, self.gutter.width(), self.fontMetrics().height() + 2, QtGui.QColor("#dceeff"))
+                painter.setPen(QtGui.QColor("#708090"))
+                painter.drawText(0, top, self.gutter.width() - 16, self.fontMetrics().height(), QtCore.Qt.AlignRight, str(line_no))
+                if block_number in self.fold_regions:
+                    rect = QtCore.QRect(self.gutter.width() - 14, top + 2, 10, 10)
+                    painter.setPen(QtGui.QColor("#4a6572"))
+                    painter.setBrush(QtGui.QColor("#ffffff"))
+                    painter.drawRect(rect)
+                    painter.drawLine(rect.left() + 2, rect.center().y(), rect.right() - 2, rect.center().y())
+                    if block_number not in self.folded_starts:
+                        painter.drawLine(rect.center().x(), rect.top() + 2, rect.center().x(), rect.bottom() - 2)
+            block = block.next()
+            top = bottom
+            bottom = top + int(self.blockBoundingRect(block).height())
+            block_number += 1
+
+    def handle_gutter_click(self, pos):
+        block = self.firstVisibleBlock()
+        block_number = block.blockNumber()
+        top = int(self.blockBoundingGeometry(block).translated(self.contentOffset()).top())
+        bottom = top + int(self.blockBoundingRect(block).height())
+        while block.isValid():
+            if block.isVisible() and top <= pos.y() <= bottom:
+                if block_number in self.fold_regions and pos.x() >= self.gutter.width() - 18:
+                    self.toggle_fold(block_number)
+                else:
+                    cursor = QtGui.QTextCursor(block)
+                    self.setTextCursor(cursor)
+                return
+            block = block.next()
+            top = bottom
+            bottom = top + int(self.blockBoundingRect(block).height())
+            block_number += 1
+
+
 class CodeEditorDialog(QtWidgets.QDialog):
     def __init__(self, parent, project_path: Path):
         super().__init__(parent)
         self.project_path = Path(project_path)
         self.current_file = None
-        self.full_text_cache = ""
-        self.focus_range = None
+        self.original_texts = {}
+        self.modified_files = set()
         self.setWindowTitle(f"Code Editor - {self.project_path.name}")
         fit_dialog_to_screen(self, 1560, 940, min_width=1080, min_height=700)
         self._build_ui()
@@ -101,7 +246,7 @@ class CodeEditorDialog(QtWidgets.QDialog):
         top.addWidget(self.cancel_btn)
         center_layout.addLayout(top)
 
-        self.editor = QtWidgets.QPlainTextEdit()
+        self.editor = FoldableCodeEditor()
         self.editor.setLineWrapMode(QtWidgets.QPlainTextEdit.NoWrap)
         self.editor.setTabStopDistance(32)
         font = QtGui.QFont("Consolas")
@@ -113,24 +258,25 @@ class CodeEditorDialog(QtWidgets.QDialog):
 
         right = QtWidgets.QWidget()
         right_layout = QtWidgets.QVBoxLayout(right)
-        self.symbols = QtWidgets.QListWidget()
-        self.focus_symbol_btn = QtWidgets.QPushButton("Focar símbolo")
-        self.full_view_btn = QtWidgets.QPushButton("Visão completa")
-        right_layout.addWidget(QtWidgets.QLabel("Funções e variáveis"))
-        right_layout.addWidget(self.symbols, 1)
-        right_layout.addWidget(self.focus_symbol_btn)
-        right_layout.addWidget(self.full_view_btn)
+        self.modified_list = QtWidgets.QListWidget()
+        self.modified_list.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        self.revert_btn = QtWidgets.QPushButton("Reverter arquivo")
+        self.open_modified_btn = QtWidgets.QPushButton("Abrir arquivo")
+        right_layout.addWidget(QtWidgets.QLabel("Arquivos editados"))
+        right_layout.addWidget(self.modified_list, 1)
+        right_layout.addWidget(self.open_modified_btn)
+        right_layout.addWidget(self.revert_btn)
         splitter.addWidget(right)
         splitter.setStretchFactor(0, 2)
-        splitter.setStretchFactor(1, 5)
+        splitter.setStretchFactor(1, 6)
         splitter.setStretchFactor(2, 2)
 
         self.reload_btn.clicked.connect(self.reload_current_file)
         self.save_btn.clicked.connect(self.save_current_file)
         self.cancel_btn.clicked.connect(self.reject)
-        self.symbols.itemDoubleClicked.connect(lambda *_: self.goto_symbol())
-        self.focus_symbol_btn.clicked.connect(self.focus_symbol)
-        self.full_view_btn.clicked.connect(self.restore_full_view)
+        self.editor.textChanged.connect(self._on_editor_text_changed)
+        self.revert_btn.clicked.connect(self.revert_selected_file)
+        self.open_modified_btn.clicked.connect(self.open_selected_modified)
 
     def _load_tree(self):
         self.file_tree.expandToDepth(1)
@@ -150,11 +296,12 @@ class CodeEditorDialog(QtWidgets.QDialog):
             QtWidgets.QMessageBox.critical(self, "Code Editor", f"Falha ao abrir arquivo:\n{exc}")
             return
         self.current_file = Path(path)
-        self.full_text_cache = text
-        self.focus_range = None
+        self.original_texts.setdefault(self.current_file, text)
+        self.editor.blockSignals(True)
         self.editor.setPlainText(text)
+        self.editor.blockSignals(False)
+        self.editor.rebuild_fold_regions()
         self.file_label.setText(str(self.current_file.relative_to(self.project_path)))
-        self._rebuild_symbols()
 
     def reload_current_file(self):
         if self.current_file:
@@ -165,63 +312,54 @@ class CodeEditorDialog(QtWidgets.QDialog):
             return
         try:
             self.current_file.write_text(self.editor.toPlainText(), encoding="utf-8")
-            self.full_text_cache = self.editor.toPlainText()
+            self.original_texts[self.current_file] = self.editor.toPlainText()
+            self._sync_modified_state(self.current_file, self.editor.toPlainText())
             QtWidgets.QMessageBox.information(self, "Code Editor", "Arquivo salvo.")
         except Exception as exc:
             QtWidgets.QMessageBox.critical(self, "Code Editor", f"Falha ao salvar:\n{exc}")
 
-    def _rebuild_symbols(self):
-        self.symbols.clear()
-        lines = self.editor.toPlainText().splitlines()
-        patterns = [
-            re.compile(r"^\s*def\s+([A-Za-z_]\w*)"),
-            re.compile(r"^\s*class\s+([A-Za-z_]\w*)"),
-            re.compile(r"^\s*(?:void|int|float|double|bool|char|String|long|short)\s+([A-Za-z_]\w*)\s*\("),
-            re.compile(r"^\s*([A-Za-z_]\w*)\s*=\s*"),
-        ]
-        for idx, line in enumerate(lines):
-            for pattern in patterns:
-                match = pattern.search(line)
-                if match:
-                    item = QtWidgets.QListWidgetItem(f"{match.group(1)}  ·  L{idx + 1}")
-                    item.setData(QtCore.Qt.UserRole, idx)
-                    self.symbols.addItem(item)
-                    break
+    def _on_editor_text_changed(self):
+        self.editor.rebuild_fold_regions()
+        if self.current_file:
+            self._sync_modified_state(self.current_file, self.editor.toPlainText())
 
-    def goto_symbol(self):
-        item = self.symbols.currentItem()
+    def _sync_modified_state(self, path: Path, text: str):
+        original = self.original_texts.get(path, "")
+        if text != original:
+            self.modified_files.add(path)
+        elif path in self.modified_files:
+            self.modified_files.remove(path)
+        self._refresh_modified_list()
+
+    def _refresh_modified_list(self):
+        current = str(self.current_file) if self.current_file else ""
+        self.modified_list.clear()
+        for path in sorted(self.modified_files):
+            item = QtWidgets.QListWidgetItem(str(path.relative_to(self.project_path)))
+            item.setData(QtCore.Qt.UserRole, str(path))
+            self.modified_list.addItem(item)
+            if str(path) == current:
+                self.modified_list.setCurrentItem(item)
+
+    def open_selected_modified(self):
+        item = self.modified_list.currentItem()
         if not item:
             return
-        line_no = int(item.data(QtCore.Qt.UserRole))
-        block = self.editor.document().findBlockByLineNumber(line_no)
-        cursor = QtGui.QTextCursor(block)
-        self.editor.setTextCursor(cursor)
-        self.editor.centerCursor()
+        self.open_file(Path(item.data(QtCore.Qt.UserRole)))
 
-    def _symbol_bounds(self, start_line: int):
-        lines = self.editor.toPlainText().splitlines()
-        start = max(0, start_line)
-        end = len(lines)
-        for idx in range(start + 1, len(lines)):
-            line = lines[idx]
-            if re.match(r"^\s*(def|class)\s+[A-Za-z_]\w*", line) or re.match(r"^\s*(?:void|int|float|double|bool|char|String|long|short)\s+[A-Za-z_]\w*\s*\(", line):
-                end = idx
-                break
-        return start, end
-
-    def focus_symbol(self):
-        item = self.symbols.currentItem()
-        if not item:
+    def revert_selected_file(self):
+        target = self.current_file
+        item = self.modified_list.currentItem()
+        if item:
+            target = Path(item.data(QtCore.Qt.UserRole))
+        if not target:
             return
-        if not self.full_text_cache:
-            self.full_text_cache = self.editor.toPlainText()
-        start, end = self._symbol_bounds(int(item.data(QtCore.Qt.UserRole)))
-        lines = self.full_text_cache.splitlines()
-        self.focus_range = (start, end)
-        self.editor.setPlainText("\n".join(lines[start:end]))
-
-    def restore_full_view(self):
-        if self.full_text_cache:
-            self.editor.setPlainText(self.full_text_cache)
-            self.focus_range = None
-            self._rebuild_symbols()
+        original = self.original_texts.get(target)
+        if original is None:
+            return
+        if target == self.current_file:
+            self.editor.blockSignals(True)
+            self.editor.setPlainText(original)
+            self.editor.blockSignals(False)
+            self.editor.rebuild_fold_regions()
+        self._sync_modified_state(target, original)
