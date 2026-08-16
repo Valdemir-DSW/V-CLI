@@ -23,6 +23,7 @@ NOTAS TECNICAS:
 
 import os
 import json
+import re
 import subprocess
 import threading
 import time
@@ -1498,6 +1499,10 @@ void loop() {
                     "sentence": str(lib.get("sentence") or ""),
                     "paragraph": str(lib.get("paragraph") or ""),
                     "url": str(lib.get("website") or ""),
+                    "author": str(lib.get("author") or ""),
+                    "maintainer": str(lib.get("maintainer") or ""),
+                    "category": str(lib.get("category") or ""),
+                    "architectures": list(lib.get("architectures") or []),
                     "versions": [],
                     "latest_version": "",
                 },
@@ -1513,6 +1518,72 @@ void loop() {
             entry["versions"].sort(key=lambda v: self._normalize_version(v), reverse=True)
             entry["latest_version"] = entry["versions"][0] if entry["versions"] else ""
         return catalog
+
+    @staticmethod
+    def _tokenize_search_term(term: str) -> list:
+        return [token for token in re.split(r"[^a-z0-9]+", str(term or "").lower()) if token]
+
+    def _score_library_match(self, entry: dict, tokens: list, normalized_term: str, installed_map: Dict[str, str]) -> tuple:
+        haystacks = {
+            "name": str(entry.get("name", "")).lower(),
+            "sentence": str(entry.get("sentence", "")).lower(),
+            "paragraph": str(entry.get("paragraph", "")).lower(),
+            "author": str(entry.get("author", "")).lower(),
+            "category": str(entry.get("category", "")).lower(),
+        }
+        score = 0
+        reasons = []
+
+        if not tokens:
+            score += 5
+        elif normalized_term and haystacks["name"] == normalized_term:
+            score += 140
+            reasons.append("exact-name")
+        elif normalized_term and haystacks["name"].startswith(normalized_term):
+            score += 100
+            reasons.append("prefix-name")
+        elif normalized_term and normalized_term in haystacks["name"]:
+            score += 70
+            reasons.append("name")
+
+        for token in tokens:
+            token_hit = False
+            if token in haystacks["name"]:
+                score += 30
+                token_hit = True
+            elif token in haystacks["sentence"]:
+                score += 12
+                token_hit = True
+            elif token in haystacks["paragraph"]:
+                score += 8
+                token_hit = True
+            elif token in haystacks["author"] or token in haystacks["category"]:
+                score += 6
+                token_hit = True
+            if token_hit:
+                reasons.append(token)
+            else:
+                score -= 15
+
+        if len(tokens) > 1 and all(token in " ".join(haystacks.values()) for token in tokens):
+            score += 18
+            reasons.append("all-tokens")
+
+        if haystacks["category"]:
+            score += 2
+        if entry.get("url"):
+            score += 1
+
+        installed_version = installed_map.get(haystacks["name"], "")
+        latest_version = str(entry.get("latest_version") or "").strip()
+        if installed_version:
+            score += 20
+            reasons.append("installed")
+            if latest_version and self._is_newer_version(latest_version, installed_version):
+                score += 16
+                reasons.append("update")
+
+        return score, ", ".join(dict.fromkeys(reasons))
 
     def search_libraries(self, term: str = "", limit: int = 0) -> list:
         catalog = self._library_catalog()
@@ -1530,6 +1601,70 @@ void loop() {
         if limit > 0:
             all_items = all_items[:limit]
         return all_items
+
+    def search_libraries_advanced(
+        self,
+        term: str = "",
+        limit: int = 0,
+        installed_only: bool = False,
+        updates_only: bool = False,
+    ) -> list:
+        catalog = self._library_catalog()
+        installed_items = self.list_libraries_fixed()
+        installed_map = {}
+        for lib in installed_items:
+            lib_name = str(lib.get("name") or "").strip()
+            version = str(lib.get("version") or "").strip()
+            if lib_name:
+                installed_map[lib_name.lower()] = version
+
+        normalized_term = str(term or "").strip().lower()
+        tokens = self._tokenize_search_term(normalized_term)
+        results = []
+
+        for entry in catalog.values():
+            item = dict(entry)
+            name_key = str(item.get("name") or "").strip().lower()
+            installed_version = installed_map.get(name_key, "")
+            latest_version = str(item.get("latest_version") or "").strip()
+            has_update = bool(installed_version and latest_version and self._is_newer_version(latest_version, installed_version))
+
+            if installed_only and not installed_version:
+                continue
+            if updates_only and not has_update:
+                continue
+
+            score, reason = self._score_library_match(item, tokens, normalized_term, installed_map)
+            if normalized_term and score <= 0:
+                continue
+
+            item["installed_version"] = installed_version
+            item["match_score"] = score
+            item["match_reason"] = reason
+            item["has_update"] = has_update
+            results.append(item)
+
+        results.sort(
+            key=lambda x: (
+                -int(x.get("match_score", 0)),
+                x.get("name", "").lower(),
+            )
+        )
+
+        if not normalized_term:
+            if updates_only:
+                results.sort(
+                    key=lambda x: (
+                        not bool(x.get("has_update")),
+                        x.get("name", "").lower(),
+                    )
+                )
+            elif installed_only:
+                results.sort(key=lambda x: x.get("name", "").lower())
+
+        if limit > 0:
+            results = results[:limit]
+        return results
 
     def get_library_versions(self, library_name: str) -> list:
         name = str(library_name or "").strip().lower()
