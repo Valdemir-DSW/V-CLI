@@ -1,3 +1,4 @@
+import base64
 import csv
 import ctypes
 import html
@@ -12,7 +13,7 @@ import sys
 import threading
 import time
 import urllib.parse
-import webbrowser
+import zlib
 from datetime import datetime
 from pathlib import Path
 
@@ -892,7 +893,9 @@ class WebBrowserQt(QtWidgets.QDialog):
         self.url_label.setReadOnly(True)
         layout.addWidget(self.url_label)
 
-        self.browser = QtWebEngineWidgets.QWebEngineView(self) if QtWebEngineWidgets is not None else None
+        compiled_runtime = bool(getattr(sys, "frozen", False)) or bool(globals().get("__compiled__"))
+        use_internal_browser = QtWebEngineWidgets is not None and not compiled_runtime
+        self.browser = QtWebEngineWidgets.QWebEngineView(self) if use_internal_browser else None
         if self.browser is not None:
             layout.addWidget(self.browser, 1)
         else:
@@ -930,7 +933,11 @@ class WebBrowserQt(QtWidgets.QDialog):
 
     def _open_external(self):
         if self._current_url:
-            webbrowser.open(self._current_url)
+            parent = self.parent()
+            if parent and hasattr(parent, "open_external_url"):
+                parent.open_external_url(self._current_url)
+            else:
+                QtGui.QDesktopServices.openUrl(QtCore.QUrl(self._current_url))
 
 
 class VCliQtApp(QtWidgets.QMainWindow):
@@ -997,6 +1004,7 @@ class VCliQtApp(QtWidgets.QMainWindow):
             self.setWindowIcon(QtGui.QIcon(str(self.app_icon_path)))
         self._apply_styles()
         self._build_ui()
+        self._sanitize_widget_texts(self)
         self.tray_icon = None
         self._quitting_from_tray = False
         self._create_tray_icon()
@@ -1041,21 +1049,112 @@ class VCliQtApp(QtWidgets.QMainWindow):
     def t(self, key: str, default: str = ""):
         return self.translations.get(key, default or key)
 
+    def _fix_mojibake_text(self, text: str) -> str:
+        value = str(text or "")
+        replacements = {
+            "ÃƒÂ§": "ç",
+            "ÃƒÂ£": "ã",
+            "ÃƒÂ¡": "á",
+            "ÃƒÂ©": "é",
+            "ÃƒÂ­": "í",
+            "ÃƒÂ³": "ó",
+            "ÃƒÂº": "ú",
+            "ÃƒÂµ": "õ",
+            "ÃƒÂª": "ê",
+            "ÃƒÂ´": "ô",
+            "ÃƒÂ¢": "â",
+            "ÃƒÂ‰": "É",
+            "ÃƒÂ“": "Ó",
+            "ÃƒÂš": "Ú",
+            "ÃƒÂ€": "À",
+            "ÃƒÂ ": "à",
+            "ÃƒÂ": "",
+            "Ã§": "ç",
+            "Ã£": "ã",
+            "Ã¡": "á",
+            "Ã©": "é",
+            "Ã­": "í",
+            "Ã³": "ó",
+            "Ãº": "ú",
+            "Ãµ": "õ",
+            "Ãª": "ê",
+            "Ã´": "ô",
+            "Ã¢": "â",
+            "Ã‰": "É",
+            "Ã“": "Ó",
+            "Ãš": "Ú",
+            "Ã€": "À",
+            "Ã ": "à",
+            "Â¿": "¿",
+            "Âº": "º",
+            "Âª": "ª",
+            "â€“": "-",
+            "â€”": "-",
+            "â€˜": "'",
+            "â€™": "'",
+            "â€œ": "\"",
+            "â€\x9d": "\"",
+            "â†’": "->",
+        }
+        for wrong, right in replacements.items():
+            value = value.replace(wrong, right)
+        return value
+
+    def _sanitize_widget_texts(self, root):
+        if root is None:
+            return
+        widgets = [root]
+        widgets.extend(root.findChildren(QtWidgets.QWidget))
+        for widget in widgets:
+            try:
+                if isinstance(widget, (QtWidgets.QLabel, QtWidgets.QPushButton, QtWidgets.QCheckBox, QtWidgets.QRadioButton)):
+                    widget.setText(self._fix_mojibake_text(widget.text()))
+                elif isinstance(widget, QtWidgets.QGroupBox):
+                    widget.setTitle(self._fix_mojibake_text(widget.title()))
+                elif isinstance(widget, QtWidgets.QLineEdit):
+                    widget.setPlaceholderText(self._fix_mojibake_text(widget.placeholderText()))
+                elif isinstance(widget, QtWidgets.QPlainTextEdit):
+                    widget.setPlaceholderText(self._fix_mojibake_text(widget.placeholderText()))
+                elif isinstance(widget, QtWidgets.QTextEdit):
+                    widget.setPlaceholderText(self._fix_mojibake_text(widget.placeholderText()))
+                elif isinstance(widget, QtWidgets.QComboBox):
+                    for index in range(widget.count()):
+                        widget.setItemText(index, self._fix_mojibake_text(widget.itemText(index)))
+                elif isinstance(widget, QtWidgets.QTabWidget):
+                    for index in range(widget.count()):
+                        widget.setTabText(index, self._fix_mojibake_text(widget.tabText(index)))
+                elif isinstance(widget, QtWidgets.QListWidget):
+                    for index in range(widget.count()):
+                        item = widget.item(index)
+                        if item:
+                            item.setText(self._fix_mojibake_text(item.text()))
+                elif isinstance(widget, QtWidgets.QTreeWidget):
+                    for index in range(widget.columnCount()):
+                        widget.headerItem().setText(index, self._fix_mojibake_text(widget.headerItem().text(index)))
+                elif isinstance(widget, QtWidgets.QTableWidget):
+                    for index in range(widget.columnCount()):
+                        header = widget.horizontalHeaderItem(index)
+                        if header:
+                            header.setText(self._fix_mojibake_text(header.text()))
+            except Exception:
+                pass
+
     def _apply_styles(self):
         theme = str(self.app_settings.get("theme", "light") or "light").strip().lower()
         if theme == "dark":
             self.setStyleSheet(
                 """
                 QMainWindow, QDialog, QWidget { background: #101418; color: #e5edf5; }
-                QMenuBar { background: #f3f4f6; color: #111827; border-bottom: 1px solid #d1d5db; }
-                QMenuBar::item { background: transparent; color: #111827; padding: 4px 8px; }
-                QMenuBar::item:selected { background: #dbeafe; color: #0f172a; border-radius: 4px; }
-                QMenuBar::item:pressed { background: #bfdbfe; color: #0f172a; border-radius: 4px; }
+                QMenuBar { background: #0d1319; color: #e5edf5; border-bottom: 1px solid #293544; }
+                QMenuBar::item { background: transparent; color: #d8e7f5; padding: 4px 8px; }
+                QMenuBar::item:selected { background: #223447; color: #ffffff; border-radius: 4px; }
+                QMenuBar::item:pressed { background: #2b4359; color: #ffffff; border-radius: 4px; }
                 QFrame#sidePanel { background: #16202a; border: 1px solid #293544; border-radius: 12px; }
                 QListWidget#recentProjects { font-size: 13px; padding: 4px; }
                 QListWidget#recentProjects::item { min-height: 28px; border-radius: 6px; padding: 4px 8px; }
                 QListWidget#recentProjects::item:selected { background: #28435c; color: white; }
                 QLabel#historyBanner { font-size: 14px; font-weight: 800; color: #f0f6fb; padding: 4px 8px; background: rgba(255,255,255,0.06); border: 1px solid #32465a; border-radius: 10px; }
+                QLabel#historyIcon { background: transparent; border: none; }
                 QLabel#boardUpdatesLabel { font-size: 12px; font-weight: 700; color: #9aa8b6; padding: 4px 8px; }
                 QLabel#mutedLabel { color: #9fb4c7; background: transparent; }
                 QLabel#sectionTitle, QLabel#managerTitle { font-size: 15px; font-weight: 700; color: #f0f6fb; }
@@ -1067,6 +1166,9 @@ class VCliQtApp(QtWidgets.QMainWindow):
                 QTabBar::tab:selected { background: #141b23; }
                 QPlainTextEdit#consoleBox, QPlainTextEdit#serialBox, QPlainTextEdit#cliBox { background: #050607; color: #00ff7f; border: 1px solid #111; border-radius: 10px; font-family: Consolas, Courier New, monospace; font-size: 12px; }
                 QLineEdit, QComboBox, QListWidget, QTableWidget, QTextEdit, QPlainTextEdit, QTextBrowser, QTreeWidget { border: 1px solid #334355; border-radius: 8px; padding: 6px; background: #0f151c; color: #e5edf5; }
+                QTableWidget { alternate-background-color: #18222d; gridline-color: #334355; selection-background-color: #35506d; selection-color: #ffffff; }
+                QTableWidget::item { background: transparent; color: #e5edf5; }
+                QTableWidget::item:selected { background: #35506d; color: #ffffff; }
                 QComboBox::drop-down { border: none; background: #1a2530; width: 24px; border-top-right-radius: 8px; border-bottom-right-radius: 8px; }
                 QComboBox QAbstractItemView, QListView, QAbstractItemView { background: #16202a; color: #e5edf5; selection-background-color: #28435c; selection-color: white; border: 1px solid #334355; }
                 QCheckBox, QRadioButton { color: #e5edf5; background: transparent; }
@@ -1144,6 +1246,10 @@ class VCliQtApp(QtWidgets.QMainWindow):
                 border: 1px solid #c8d3df;
                 border-radius: 10px;
             }
+            QLabel#historyIcon {
+                background: transparent;
+                border: none;
+            }
             QLabel#boardUpdatesLabel {
                 font-size: 12px;
                 font-weight: 700;
@@ -1206,6 +1312,20 @@ class VCliQtApp(QtWidgets.QMainWindow):
                 background: white;
                 color: #1e2933;
             }
+            QTableWidget {
+                alternate-background-color: #f5f8fb;
+                gridline-color: #c8d3df;
+                selection-background-color: #cfe5ff;
+                selection-color: #12344d;
+            }
+            QTableWidget::item {
+                background: transparent;
+                color: #1e2933;
+            }
+            QTableWidget::item:selected {
+                background: #cfe5ff;
+                color: #12344d;
+            }
             QComboBox::drop-down {
                 border: none;
                 background: #eef3f7;
@@ -1266,6 +1386,16 @@ class VCliQtApp(QtWidgets.QMainWindow):
         except Exception:
             pass
 
+    def _apply_windows_titlebar_theme_to_widget(self, widget, dark: bool):
+        if sys.platform != "win32" or widget is None:
+            return
+        try:
+            hwnd = int(widget.winId())
+            value = ctypes.c_int(1 if dark else 0)
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 20, ctypes.byref(value), ctypes.sizeof(value))
+        except Exception:
+            pass
+
     def _build_ui(self):
         root = QtWidgets.QWidget()
         self.setCentralWidget(root)
@@ -1288,6 +1418,7 @@ class VCliQtApp(QtWidgets.QMainWindow):
         history_row = QtWidgets.QHBoxLayout()
         self.history_icon_label = QtWidgets.QLabel()
         self.history_icon_label.setFixedSize(28, 28)
+        self.history_icon_label.setObjectName("historyIcon")
         history = QtWidgets.QLabel(self.t("nav.history", "HISTORY"))
         history.setObjectName("historyBanner")
         history_row.addWidget(self.history_icon_label, 0, QtCore.Qt.AlignVCenter)
@@ -1366,6 +1497,8 @@ class VCliQtApp(QtWidgets.QMainWindow):
         about_action = QtWidgets.QAction("About", self)
         self.action_lib_backup = QtWidgets.QAction("Backup de bibliotecas", self)
         self.action_lib_restore = QtWidgets.QAction("Restaurar backup de bibliotecas", self)
+        self.action_export_project_settings = QtWidgets.QAction("Exportar configurações do projeto", self)
+        self.action_import_project_settings = QtWidgets.QAction("Importar configurações do projeto", self)
         self.action_open_csv_log = QtWidgets.QAction("Lista de logs do projeto", self)
         self.action_open_external_log = QtWidgets.QAction("Abrir log externo", self)
         self.action_code_editor = QtWidgets.QAction("Code Editor", self)
@@ -1378,6 +1511,9 @@ class VCliQtApp(QtWidgets.QMainWindow):
         tools_menu.addAction(self.action_open_external_log)
         tools_menu.addAction(self.action_code_editor)
         tools_menu.addAction(self.action_docs_editor)
+        tools_menu.addSeparator()
+        tools_menu.addAction(self.action_export_project_settings)
+        tools_menu.addAction(self.action_import_project_settings)
         tools_menu.addSeparator()
         tools_menu.addAction(self.action_lib_backup)
         tools_menu.addAction(self.action_lib_restore)
@@ -1401,14 +1537,16 @@ class VCliQtApp(QtWidgets.QMainWindow):
         self.action_open_external_log.triggered.connect(self.open_external_csv_log_viewer)
         self.action_code_editor.triggered.connect(self.open_code_editor_dialog)
         self.action_docs_editor.triggered.connect(self.open_docs_editor_dialog)
+        self.action_export_project_settings.triggered.connect(self.export_project_settings_bundle)
+        self.action_import_project_settings.triggered.connect(self.import_project_settings_bundle)
         self.action_lib_backup.triggered.connect(self.backup_installed_libraries)
         self.action_lib_restore.triggered.connect(self.restore_libraries_backup)
         settings_action.triggered.connect(self.open_settings_dialog)
         about_action.triggered.connect(self.show_about_dialog)
-        link_arduino.triggered.connect(lambda: webbrowser.open("https://arduino.github.io/arduino-cli/latest/"))
-        link_python.triggered.connect(lambda: webbrowser.open("https://www.python.org/"))
-        link_pyqt.triggered.connect(lambda: webbrowser.open("https://pypi.org/project/PyQt5/"))
-        link_vscode.triggered.connect(lambda: webbrowser.open("https://code.visualstudio.com/"))
+        link_arduino.triggered.connect(lambda: self.open_external_url("https://arduino.github.io/arduino-cli/latest/"))
+        link_python.triggered.connect(lambda: self.open_external_url("https://www.python.org/"))
+        link_pyqt.triggered.connect(lambda: self.open_external_url("https://pypi.org/project/PyQt5/"))
+        link_vscode.triggered.connect(lambda: self.open_external_url("https://code.visualstudio.com/"))
 
     def _build_code_tab(self):
         tab = QtWidgets.QWidget()
@@ -1477,7 +1615,10 @@ class VCliQtApp(QtWidgets.QMainWindow):
         self.dynamic_scroll = QtWidgets.QScrollArea()
         self.dynamic_scroll.setWidgetResizable(True)
         self.dynamic_scroll.setMinimumHeight(240)
+        self.dynamic_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        self.dynamic_scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
         self.dynamic_scroll_host = QtWidgets.QWidget()
+        self.dynamic_scroll_host.setStyleSheet("background: transparent;")
         self.dynamic_form = QtWidgets.QVBoxLayout(self.dynamic_scroll_host)
         self.dynamic_form.setContentsMargins(4, 4, 4, 4)
         self.dynamic_form.setSpacing(8)
@@ -1577,6 +1718,7 @@ class VCliQtApp(QtWidgets.QMainWindow):
         layout.addWidget(self.libs_table, 1)
         self.libs_updates_label = QtWidgets.QLabel("AtualizaÃ§Ãµes pendentes: 0")
         self.libs_updates_label.setObjectName("boardUpdatesLabel")
+        self.libs_updates_label.setText("Atualizações pendentes: 0")
         layout.addWidget(self.libs_updates_label)
         self.libs_refresh_btn.clicked.connect(self.load_installed_libraries)
         self.libs_zip_btn.clicked.connect(self.install_library_zip)
@@ -2186,7 +2328,10 @@ class VCliQtApp(QtWidgets.QMainWindow):
         row = QtWidgets.QHBoxLayout()
         label = QtWidgets.QLabel(label_text)
         label.setMinimumWidth(150)
-        label.setStyleSheet("font-weight: 700;")
+        if str(self.app_settings.get("theme", "light") or "light").strip().lower() == "dark":
+            label.setStyleSheet("font-weight: 700; background: transparent; color: #f0f6fb; padding: 2px 0;")
+        else:
+            label.setStyleSheet("font-weight: 700; background: transparent; color: #12344d; padding: 2px 0;")
         value_label.setMinimumHeight(30)
         if str(self.app_settings.get("theme", "light") or "light").strip().lower() == "dark":
             value_label.setStyleSheet("border: 1px solid #334355; border-radius: 8px; background: #0f151c; color: #e5edf5; padding: 6px;")
@@ -2258,6 +2403,7 @@ class VCliQtApp(QtWidgets.QMainWindow):
             self.action_vscode.setText(editor_title)
         self._apply_backend_cli_settings()
         self._sync_tray_settings()
+        self._sanitize_widget_texts(self)
 
     def _apply_startup_window_size(self, settings: dict | None = None):
         settings = self._ensure_app_setting_defaults(settings or self.app_settings)
@@ -2490,6 +2636,8 @@ class VCliQtApp(QtWidgets.QMainWindow):
             getattr(self, "action_upload", None),
             getattr(self, "action_export", None),
             getattr(self, "action_properties", None),
+            getattr(self, "action_export_project_settings", None),
+            getattr(self, "action_import_project_settings", None),
             getattr(self, "action_open_csv_log", None),
             getattr(self, "action_code_editor", None),
             getattr(self, "action_docs_editor", None),
@@ -3707,7 +3855,7 @@ class VCliQtApp(QtWidgets.QMainWindow):
             pixmap = QtGui.QPixmap(str(self.default_project_icon_path))
         if pixmap.isNull():
             pixmap = QtGui.QPixmap(size, size)
-            pixmap.fill(QtGui.QColor("#dbe7f3"))
+            pixmap.fill(QtCore.Qt.transparent)
         return pixmap.scaled(size, size, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
 
     def _icon_for_project(self, project_path: Path, config: dict | None = None, size: int = 24) -> QtGui.QIcon:
@@ -3794,6 +3942,9 @@ class VCliQtApp(QtWidgets.QMainWindow):
 
     def _build_resolution_prompt(self, title: str, error_msg: str, output: str = "") -> str:
         project_name = self.current_project.name if self.current_project else "sem_projeto"
+        raw_error_block = "\n\n".join(
+            part for part in [str(error_msg or "").strip(), str(output or "").strip()] if part
+        ).strip()
         parts = [
             "Analise este erro de compilação/upload do Arduino CLI e proponha uma resolução objetiva.",
             f"Tarefa: {title}",
@@ -3809,6 +3960,14 @@ class VCliQtApp(QtWidgets.QMainWindow):
                     "",
                     "Output completo relevante:",
                     clean_output[:12000],
+                ]
+            )
+        if raw_error_block:
+            parts.extend(
+                [
+                    "",
+                    "Erro bruto para consulta/copia:",
+                    raw_error_block[:12000],
                 ]
             )
         parts.extend(
@@ -3829,7 +3988,36 @@ class VCliQtApp(QtWidgets.QMainWindow):
         dialog.load_url(url)
         dialog.exec_()
 
+    def open_external_url(self, url: str) -> bool:
+        target = str(url or "").strip()
+        if not target:
+            return False
+        try:
+            opened = QtGui.QDesktopServices.openUrl(QtCore.QUrl(target))
+        except Exception as exc:
+            self.log(f"[BROWSER] Falha ao abrir URL externa: {exc}")
+            QtWidgets.QMessageBox.warning(self, "Navegador", f"Não consegui abrir o navegador:\n{exc}")
+            return False
+        if not opened:
+            self.log(f"[BROWSER] Sistema recusou abrir URL: {target}")
+            QtWidgets.QMessageBox.warning(self, "Navegador", "O sistema não conseguiu abrir o navegador padrão.")
+            return False
+        return True
+
+    def _is_abort_message(self, text: str) -> bool:
+        normalized = self._fix_mojibake_text(str(text or "")).strip().lower()
+        normalized = normalized.replace("ç", "c").replace("ã", "a").replace("á", "a")
+        return normalized in {
+            "operacao abortada pelo usuario",
+            "operacao cancelada pelo usuario",
+            "abortado pelo usuario",
+            "cancelado pelo usuario",
+        }
+
     def show_error_dialog(self, title: str, error_msg: str, output: str = ""):
+        if self._is_abort_message(error_msg):
+            self.log(output or f"[ABORT] {title}")
+            return
         dialog = QtWidgets.QDialog(self)
         dialog.setWindowTitle(f"Erro em {title}")
         self.fit_dialog_to_screen(dialog, 760, 620)
@@ -3887,6 +4075,8 @@ class VCliQtApp(QtWidgets.QMainWindow):
         width = min(preferred_width, max(520, available.width() - 80))
         height = min(preferred_height, max(360, available.height() - 80))
         dialog.resize(width, height)
+        dark = str(self.app_settings.get("theme", "light") or "light").strip().lower() == "dark"
+        self._apply_windows_titlebar_theme_to_widget(dialog, dark)
 
     def log_build_summary(self, output: str):
         if not output:
@@ -4022,6 +4212,434 @@ class VCliQtApp(QtWidgets.QMainWindow):
                 json.dump(self.current_config, handle, ensure_ascii=False, indent=4)
         except Exception as exc:
             self.log(f"[ERRO] Falha ao salvar config: {exc}")
+
+    def _clone_jsonable(self, value):
+        return json.loads(json.dumps(value, ensure_ascii=False))
+
+    def _bundle_prefix(self) -> str:
+        return "VCLI-PROJECT-BUNDLE-1:"
+
+    def _build_project_settings_payload(self) -> dict:
+        self.save_config()
+        config = self._clone_jsonable(self.current_config or {})
+        payload = {
+            "schema": "vcli_project_bundle",
+            "schema_version": 1,
+            "exported_at": datetime.now().isoformat(timespec="seconds"),
+            "project_name": self.current_project.name if self.current_project else config.get("name", ""),
+            "config": config,
+            "assets": {},
+        }
+        icon_rel = str(config.get("properties", {}).get("icon", "") or "").strip()
+        if self.current_project and icon_rel:
+            icon_path = (self.current_project / icon_rel).resolve()
+            try:
+                if icon_path.is_file():
+                    payload["assets"]["project_icon"] = {
+                        "relative_path": icon_rel,
+                        "data_b64": base64.b64encode(icon_path.read_bytes()).decode("ascii"),
+                    }
+            except Exception as exc:
+                self.log(f"[EXPORT] Não consegui embutir o ícone do projeto: {exc}")
+        return payload
+
+    def _encode_project_settings_payload(self, payload: dict) -> str:
+        raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        packed = zlib.compress(raw, level=9)
+        return self._bundle_prefix() + base64.urlsafe_b64encode(packed).decode("ascii")
+
+    def _decode_project_settings_payload(self, text: str) -> dict:
+        raw_text = str(text or "").strip()
+        if not raw_text:
+            raise ValueError("Cole um pacote exportado ou carregue um arquivo.")
+        compact = "".join(raw_text.split())
+        if compact.startswith(self._bundle_prefix()):
+            compact = compact[len(self._bundle_prefix()):]
+        try:
+            decoded = zlib.decompress(base64.urlsafe_b64decode(compact.encode("ascii")))
+        except Exception as exc:
+            raise ValueError(f"Pacote inválido ou corrompido: {exc}") from exc
+        try:
+            payload = json.loads(decoded.decode("utf-8"))
+        except Exception as exc:
+            raise ValueError(f"Não consegui decodificar o conteúdo: {exc}") from exc
+        if not isinstance(payload, dict) or not isinstance(payload.get("config"), dict):
+            raise ValueError("O pacote não contém uma configuração de projeto válida.")
+        return payload
+
+    def _import_project_label_map(self) -> dict:
+        return {
+            "name": "Nome do projeto",
+            "fqbn": "Placa (FQBN)",
+            "port": "Porta padrão",
+            "baudrate": "Baudrate",
+            "variant": "Variante da placa",
+            "custom_libs": "Bibliotecas customizadas",
+        }
+
+    def _project_import_label(self, path: str) -> str:
+        label_map = self._import_project_label_map()
+        if path in label_map:
+            return label_map[path]
+        if path.startswith("tools."):
+            return f"Ferramenta da placa: {path.split('.', 1)[1]}"
+        if path.startswith("properties."):
+            return f"Propriedade: {path.split('.', 1)[1]}"
+        if path == "asset.project_icon":
+            return "Ícone do projeto"
+        return path
+
+    def _project_import_preview(self, value) -> str:
+        if value in (None, "", [], {}):
+            return "(vazio)"
+        if isinstance(value, (dict, list)):
+            text = json.dumps(value, ensure_ascii=False)
+        else:
+            text = str(value)
+        text = text.replace("\r", " ").replace("\n", " ")
+        if len(text) > 120:
+            text = text[:117] + "..."
+        return text
+
+    def _build_project_import_changes(self, imported_config: dict, assets: dict | None = None) -> list:
+        current = self._clone_jsonable(self.current_config or {})
+        incoming = self._clone_jsonable(imported_config or {})
+        changes = []
+
+        def add_change(path: str, new_value):
+            current_value = current.get(path) if "." not in path else None
+            changes.append(
+                {
+                    "path": path,
+                    "label": self._project_import_label(path),
+                    "current": current_value,
+                    "new": new_value,
+                }
+            )
+
+        for key in ["name", "fqbn", "port", "baudrate", "variant", "custom_libs"]:
+            current_value = current.get(key)
+            new_value = incoming.get(key)
+            if current_value != new_value:
+                changes.append(
+                    {
+                        "path": key,
+                        "label": self._project_import_label(key),
+                        "current": current_value,
+                        "new": new_value,
+                    }
+                )
+
+        current_tools = current.get("tools", {}) if isinstance(current.get("tools"), dict) else {}
+        incoming_tools = incoming.get("tools", {}) if isinstance(incoming.get("tools"), dict) else {}
+        for tool_key in sorted(set(current_tools) | set(incoming_tools)):
+            current_value = current_tools.get(tool_key)
+            new_value = incoming_tools.get(tool_key)
+            if current_value != new_value:
+                changes.append(
+                    {
+                        "path": f"tools.{tool_key}",
+                        "label": self._project_import_label(f"tools.{tool_key}"),
+                        "current": current_value,
+                        "new": new_value,
+                    }
+                )
+
+        current_props = current.get("properties", {}) if isinstance(current.get("properties"), dict) else {}
+        incoming_props = incoming.get("properties", {}) if isinstance(incoming.get("properties"), dict) else {}
+        for prop_key in sorted(set(current_props) | set(incoming_props)):
+            if prop_key == "icon":
+                continue
+            current_value = current_props.get(prop_key)
+            new_value = incoming_props.get(prop_key)
+            if current_value != new_value:
+                changes.append(
+                    {
+                        "path": f"properties.{prop_key}",
+                        "label": self._project_import_label(f"properties.{prop_key}"),
+                        "current": current_value,
+                        "new": new_value,
+                    }
+                )
+
+        current_icon = str(current_props.get("icon", "") or "").strip()
+        imported_icon = str(incoming_props.get("icon", "") or "").strip()
+        has_icon_asset = bool((assets or {}).get("project_icon", {}).get("data_b64"))
+        if current_icon != imported_icon or (imported_icon and has_icon_asset):
+            changes.append(
+                {
+                    "path": "asset.project_icon",
+                    "label": self._project_import_label("asset.project_icon"),
+                    "current": current_icon,
+                    "new": imported_icon or "(remover)",
+                }
+            )
+        return changes
+
+    def _set_project_value_by_path(self, path: str, value, assets: dict | None = None):
+        assets = assets or {}
+        if path == "name":
+            self.current_config["name"] = str(value or self.current_project.name).strip() or self.current_project.name
+            return
+        if path in {"fqbn", "port", "baudrate", "variant"}:
+            self.current_config[path] = str(value or "").strip()
+            return
+        if path == "custom_libs":
+            self.current_config["custom_libs"] = list(value or [])
+            return
+        if path.startswith("tools."):
+            tool_key = path.split(".", 1)[1]
+            tools = self.current_config.setdefault("tools", {})
+            if value in (None, ""):
+                tools.pop(tool_key, None)
+            else:
+                tools[tool_key] = value
+            return
+        if path.startswith("properties."):
+            prop_key = path.split(".", 1)[1]
+            props = self.current_config.setdefault("properties", {})
+            props[prop_key] = value
+            return
+        if path == "asset.project_icon":
+            props = self.current_config.setdefault("properties", {})
+            asset = assets.get("project_icon", {}) if isinstance(assets, dict) else {}
+            icon_name = str(asset.get("relative_path") or value or "").strip()
+            if not icon_name:
+                props["icon"] = ""
+                return
+            data_b64 = str(asset.get("data_b64", "") or "").strip()
+            suffix = Path(icon_name).suffix.lower() or ".png"
+            target_name = f"project_icon{suffix}"
+            target_path = self.current_project / target_name
+            if data_b64:
+                target_path.write_bytes(base64.b64decode(data_b64.encode("ascii")))
+                props["icon"] = target_name
+            else:
+                raise ValueError("O pacote referencia um ícone, mas não trouxe o arquivo embutido.")
+
+    def _show_project_import_review_dialog(self, payload: dict) -> bool:
+        imported_config = payload.get("config", {})
+        assets = payload.get("assets", {}) if isinstance(payload.get("assets"), dict) else {}
+        changes = self._build_project_import_changes(imported_config, assets)
+        if not changes:
+            QtWidgets.QMessageBox.information(self, "Importar configurações", "Esse pacote não traz mudanças para o projeto atual.")
+            return False
+
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle("Revisar importação de configurações")
+        self.fit_dialog_to_screen(dialog, 980, 680)
+        layout = QtWidgets.QVBoxLayout(dialog)
+        intro = QtWidgets.QLabel(
+            "Revise o que vai mudar no projeto atual. Você pode desmarcar qualquer item antes de aplicar."
+        )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+        source_name = str(payload.get("project_name", "") or "-").strip()
+        exported_at = str(payload.get("exported_at", "") or "-").strip()
+        meta = QtWidgets.QLabel(f"Origem: {source_name} | Exportado em: {exported_at}")
+        meta.setWordWrap(True)
+        layout.addWidget(meta)
+
+        table = QtWidgets.QTreeWidget()
+        table.setColumnCount(3)
+        table.setHeaderLabels(["Configuração", "Atual", "Importado"])
+        table.setRootIsDecorated(False)
+        table.setAlternatingRowColors(True)
+        dark = str(self.app_settings.get("theme", "light") or "light").strip().lower() == "dark"
+        if dark:
+            table.setStyleSheet(
+                "QTreeWidget { background: #111821; color: #e5edf5; border: 1px solid #334355; alternate-background-color: #18222d; }"
+                "QTreeWidget::item { background: transparent; color: #e5edf5; }"
+                "QTreeWidget::item:selected { background: #2b6cb0; color: white; }"
+                "QHeaderView::section { background: #1b2632; color: #e5edf5; border: 1px solid #334355; padding: 6px; }"
+            )
+        else:
+            table.setStyleSheet(
+                "QTreeWidget { background: #ffffff; color: #1e2933; border: 1px solid #c8d3df; alternate-background-color: #f5f8fb; }"
+                "QTreeWidget::item { background: transparent; color: #1e2933; }"
+                "QTreeWidget::item:selected { background: #cfe5ff; color: #12344d; }"
+                "QHeaderView::section { background: #eef3f7; color: #12344d; border: 1px solid #c8d3df; padding: 6px; }"
+            )
+        layout.addWidget(table, 1)
+
+        for change in changes:
+            item = QtWidgets.QTreeWidgetItem(
+                [
+                    change["label"],
+                    self._project_import_preview(change["current"]),
+                    self._project_import_preview(change["new"]),
+                ]
+            )
+            item.setFlags(item.flags() | QtCore.Qt.ItemIsUserCheckable)
+            item.setCheckState(0, QtCore.Qt.Checked)
+            item.setData(0, QtCore.Qt.UserRole, change["path"])
+            table.addTopLevelItem(item)
+
+        status_label = QtWidgets.QLabel("")
+        layout.addWidget(status_label)
+
+        def refresh_status():
+            selected = 0
+            for index in range(table.topLevelItemCount()):
+                if table.topLevelItem(index).checkState(0) == QtCore.Qt.Checked:
+                    selected += 1
+            status_label.setText(f"Itens marcados para aplicar: {selected} de {table.topLevelItemCount()}")
+
+        table.itemChanged.connect(lambda *_: refresh_status())
+        refresh_status()
+
+        action_row = QtWidgets.QHBoxLayout()
+        mark_all_btn = QtWidgets.QPushButton("Marcar tudo")
+        clear_all_btn = QtWidgets.QPushButton("Desmarcar tudo")
+        action_row.addWidget(mark_all_btn)
+        action_row.addWidget(clear_all_btn)
+        action_row.addStretch(1)
+        layout.addLayout(action_row)
+
+        def set_all(state):
+            for index in range(table.topLevelItemCount()):
+                table.topLevelItem(index).setCheckState(0, state)
+
+        mark_all_btn.clicked.connect(lambda: set_all(QtCore.Qt.Checked))
+        clear_all_btn.clicked.connect(lambda: set_all(QtCore.Qt.Unchecked))
+
+        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        buttons.button(QtWidgets.QDialogButtonBox.Ok).setText("Aplicar selecionados")
+        buttons.rejected.connect(dialog.reject)
+
+        def apply_selected():
+            selected_paths = []
+            for index in range(table.topLevelItemCount()):
+                item = table.topLevelItem(index)
+                if item.checkState(0) == QtCore.Qt.Checked:
+                    selected_paths.append(item.data(0, QtCore.Qt.UserRole))
+            if not selected_paths:
+                QtWidgets.QMessageBox.information(dialog, "Importar configurações", "Nenhuma alteração foi selecionada.")
+                return
+            try:
+                for path in selected_paths:
+                    if path == "asset.project_icon":
+                        imported_value = imported_config.get("properties", {}).get("icon", "")
+                    elif path.startswith("tools."):
+                        imported_value = imported_config.get("tools", {}).get(path.split(".", 1)[1])
+                    elif path.startswith("properties."):
+                        imported_value = imported_config.get("properties", {}).get(path.split(".", 1)[1])
+                    else:
+                        imported_value = imported_config.get(path)
+                    self._set_project_value_by_path(path, imported_value, assets=assets)
+                self._ensure_project_property_defaults()
+                self.save_config()
+                self.update_project_info()
+                self.log(f"[IMPORT] Configurações importadas de '{source_name}'")
+                dialog.accept()
+            except Exception as exc:
+                self.show_error_dialog("Importar configurações", str(exc))
+
+        buttons.accepted.connect(apply_selected)
+        layout.addWidget(buttons)
+        return dialog.exec_() == QtWidgets.QDialog.Accepted
+
+    def export_project_settings_bundle(self):
+        if not self.current_project or not self.current_config:
+            QtWidgets.QMessageBox.warning(self, "Exportar configurações", "Abra um projeto antes de exportar as configurações.")
+            return
+        payload = self._build_project_settings_payload()
+        encoded = self._encode_project_settings_payload(payload)
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle("Exportar configurações do projeto")
+        self.fit_dialog_to_screen(dialog, 880, 540)
+        layout = QtWidgets.QVBoxLayout(dialog)
+        info = QtWidgets.QLabel(
+            "Esse pacote contém as configurações do projeto atual, incluindo placa, propriedades, versionamento e ícone embutido quando existir."
+        )
+        info.setWordWrap(True)
+        layout.addWidget(info)
+        editor = QtWidgets.QPlainTextEdit()
+        editor.setPlainText(encoded)
+        layout.addWidget(editor, 1)
+        row = QtWidgets.QHBoxLayout()
+        copy_btn = QtWidgets.QPushButton("Copiar pacote")
+        save_btn = QtWidgets.QPushButton("Salvar em arquivo")
+        close_btn = QtWidgets.QPushButton("Fechar")
+        row.addWidget(copy_btn)
+        row.addWidget(save_btn)
+        row.addStretch(1)
+        row.addWidget(close_btn)
+        layout.addLayout(row)
+
+        copy_btn.clicked.connect(lambda: QtWidgets.QApplication.clipboard().setText(editor.toPlainText().strip()))
+
+        def save_file():
+            suggested = f"{self.current_project.name}_config.vcli"
+            path, _ = QtWidgets.QFileDialog.getSaveFileName(
+                dialog,
+                "Salvar pacote de configurações",
+                str(self.current_project / suggested),
+                "Pacote V CLI (*.vcli);;Texto (*.txt)",
+            )
+            if not path:
+                return
+            try:
+                Path(path).write_text(editor.toPlainText().strip(), encoding="utf-8")
+                self.log(f"[EXPORT] Pacote salvo em {path}")
+            except Exception as exc:
+                self.show_error_dialog("Exportar configurações", str(exc))
+
+        save_btn.clicked.connect(save_file)
+        close_btn.clicked.connect(dialog.accept)
+        dialog.exec_()
+
+    def import_project_settings_bundle(self):
+        if not self.current_project or not self.current_config:
+            QtWidgets.QMessageBox.warning(self, "Importar configurações", "Abra um projeto antes de importar configurações.")
+            return
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle("Importar configurações do projeto")
+        self.fit_dialog_to_screen(dialog, 880, 560)
+        layout = QtWidgets.QVBoxLayout(dialog)
+        info = QtWidgets.QLabel(
+            "Cole o pacote inline exportado por outro projeto ou carregue um arquivo. Antes de aplicar, o V CLI vai mostrar exatamente o que será alterado."
+        )
+        info.setWordWrap(True)
+        layout.addWidget(info)
+        editor = QtWidgets.QPlainTextEdit()
+        layout.addWidget(editor, 1)
+        row = QtWidgets.QHBoxLayout()
+        load_btn = QtWidgets.QPushButton("Carregar arquivo")
+        analyze_btn = QtWidgets.QPushButton("Analisar mudanças")
+        close_btn = QtWidgets.QPushButton("Fechar")
+        row.addWidget(load_btn)
+        row.addStretch(1)
+        row.addWidget(analyze_btn)
+        row.addWidget(close_btn)
+        layout.addLayout(row)
+
+        def load_file():
+            path, _ = QtWidgets.QFileDialog.getOpenFileName(
+                dialog,
+                "Abrir pacote de configurações",
+                str(self.current_project),
+                "Pacote V CLI (*.vcli *.txt);;Todos (*.*)",
+            )
+            if not path:
+                return
+            try:
+                editor.setPlainText(Path(path).read_text(encoding="utf-8"))
+            except Exception as exc:
+                self.show_error_dialog("Importar configurações", str(exc))
+
+        def analyze_bundle():
+            try:
+                payload = self._decode_project_settings_payload(editor.toPlainText())
+            except Exception as exc:
+                self.show_error_dialog("Importar configurações", str(exc))
+                return
+            self._show_project_import_review_dialog(payload)
+
+        load_btn.clicked.connect(load_file)
+        analyze_btn.clicked.connect(analyze_bundle)
+        close_btn.clicked.connect(dialog.accept)
+        dialog.exec_()
 
     def clear_dynamic_board_details(self):
         self.variant_options = []
