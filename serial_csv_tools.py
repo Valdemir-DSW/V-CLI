@@ -137,16 +137,30 @@ class SerialPlotWidget(QtWidgets.QWidget):
         self.selected_series = []
         self.plot_type = "line"
         self.color_map = {}
+        self.scale_info = {}
+        self.hover_pos = None
+        self.setMouseTracking(True)
 
-    def set_data(self, series: dict, selected_series=None, plot_type: str = "line", color_map=None):
+    def set_data(self, series: dict, selected_series=None, plot_type: str = "line", color_map=None, scale_info=None):
         self.series = series or {}
         self.plot_type = plot_type or "line"
         self.color_map = dict(color_map or {})
+        self.scale_info = dict(scale_info or {})
         if selected_series is None:
             self.selected_series = list(self.series.keys())[:4]
         else:
             self.selected_series = [name for name in selected_series if name in self.series]
         self.update()
+
+    def mouseMoveEvent(self, event):
+        self.hover_pos = event.pos()
+        self.update()
+        super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event):
+        self.hover_pos = None
+        self.update()
+        super().leaveEvent(event)
 
     def paintEvent(self, event):
         painter = QtGui.QPainter(self)
@@ -230,6 +244,30 @@ class SerialPlotWidget(QtWidgets.QWidget):
             painter.setPen(QtGui.QColor("#d7e3ee"))
             painter.drawText(legend_x + 14, legend_y, name)
             legend_x += 110
+
+        if self.scale_info:
+            scale_y = plot_rect.top() + 18
+            for index, (name, info) in enumerate(self.scale_info.items()):
+                painter.setPen(QtGui.QColor(self.color_map.get(name, colors[index % len(colors)])))
+                painter.drawText(plot_rect.right() - 170, scale_y, f"{name}: {info}")
+                scale_y += 16
+
+        if self.hover_pos and plot_rect.contains(self.hover_pos):
+            hover_ratio = (self.hover_pos.x() - plot_rect.left()) / max(plot_rect.width(), 1)
+            hover_x_value = min_x + hover_ratio * (max_x - min_x)
+            painter.setPen(QtGui.QPen(QtGui.QColor("#ffffff"), 1, QtCore.Qt.DashLine))
+            painter.drawLine(int(self.hover_pos.x()), plot_rect.top(), int(self.hover_pos.x()), plot_rect.bottom())
+            tips = []
+            for name, points in visible:
+                nearest = min(points, key=lambda item: abs(item[0] - hover_x_value))
+                tips.append(f"{name}: {nearest[1]:.3f}")
+            tip_text = f"x={hover_x_value:.1f} ms | " + " | ".join(tips[:4])
+            tip_rect = QtCore.QRectF(plot_rect.left() + 8, plot_rect.top() + 8, min(plot_rect.width() - 16, 460), 24)
+            painter.setPen(QtCore.Qt.NoPen)
+            painter.setBrush(QtGui.QColor(10, 16, 22, 210))
+            painter.drawRoundedRect(tip_rect, 8, 8)
+            painter.setPen(QtGui.QColor("#eef6ff"))
+            painter.drawText(tip_rect.adjusted(8, 0, -8, 0), QtCore.Qt.AlignVCenter | QtCore.Qt.AlignLeft, tip_text)
 
 
 class TimelineWidget(QtWidgets.QWidget):
@@ -389,7 +427,7 @@ class CsvLogViewerDialog(QtWidgets.QDialog):
         view_layout = QtWidgets.QVBoxLayout(view_tab)
         limit_row = QtWidgets.QHBoxLayout()
         self.point_limit_spin = QtWidgets.QSpinBox()
-        self.point_limit_spin.setRange(10, 5000)
+        self.point_limit_spin.setRange(5, 5000)
         self.point_limit_spin.setSingleStep(10)
         self.point_limit_spin.setValue(120)
         self.visible_vars_spin = QtWidgets.QSpinBox()
@@ -608,6 +646,7 @@ class CsvLogViewerDialog(QtWidgets.QDialog):
             if item.checkState() == QtCore.Qt.Checked:
                 selected.append(item.text())
         series = extract_numeric_series(self.visible_records)
+        scale_info = {}
         if self.normalize_check.isChecked() or self.split_check.isChecked():
             transformed = {}
             step = self.stack_step_spin.value()
@@ -620,11 +659,13 @@ class CsvLogViewerDialog(QtWidgets.QDialog):
                 span = max(max_y - min_y, 1e-9)
                 offset = idx * step if self.split_check.isChecked() else 0.0
                 transformed[name] = [(x, ((y - min_y) / span) + offset) for x, y in points]
+                if self.split_check.isChecked():
+                    scale_info[name] = f"{min_y:.3f} .. {max_y:.3f}"
             for name, points in series.items():
                 if name not in transformed:
                     transformed[name] = points
             series = transformed
-        self.plot.set_data(series, selected_series=selected, plot_type=self.plot_type_combo.currentText(), color_map=self.series_colors)
+        self.plot.set_data(series, selected_series=selected, plot_type=self.plot_type_combo.currentText(), color_map=self.series_colors, scale_info=scale_info)
 
 
 class CsvLogBrowserDialog(QtWidgets.QDialog):

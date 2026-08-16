@@ -390,7 +390,17 @@ class CLIBackend:
                 "autoversion_mode": "disabled",
                 "autoversion_file": "",
                 "autoversion_variable": "VERSION",
-                "autoversion_kind": "string"
+                "autoversion_kind": "string",
+                "autoversion_value_mode": "increment",
+                "autoversion_lua_script": "return ctx.current_value\n",
+                "batch_mode": "disabled",
+                "batch_file": "",
+                "batch_variable": "LOT",
+                "batch_kind": "string",
+                "batch_value_mode": "preset",
+                "batch_pattern": "date_time",
+                "batch_lua_script": "return ctx.timestamp_compact\n",
+                "compile_questions": []
             }
         }
         

@@ -1,4 +1,5 @@
 import csv
+import html
 import json
 import locale
 import os
@@ -14,6 +15,21 @@ from datetime import datetime
 from pathlib import Path
 
 from PyQt5 import QtCore, QtGui, QtWidgets
+
+try:
+    import winreg
+except Exception:
+    winreg = None
+
+try:
+    from lupa import LuaRuntime
+except Exception:
+    LuaRuntime = None
+
+try:
+    import yaml
+except Exception:
+    yaml = None
 
 from cli_backend import CLIBackend
 from code_editor_tools import CodeEditorDialog
@@ -825,6 +841,7 @@ class VCliQtApp(QtWidgets.QMainWindow):
         self.current_project = None
         self.current_config = None
         self.backend = None
+        self.git_available = bool(shutil.which("git"))
         self.serial_connection = None
         self.serial_stamp_enabled = False
         self.serial_tx_enabled = False
@@ -1029,6 +1046,7 @@ class VCliQtApp(QtWidgets.QMainWindow):
 
         side = QtWidgets.QFrame()
         side.setObjectName("sidePanel")
+        side.setMinimumWidth(340)
         side_layout = QtWidgets.QVBoxLayout(side)
         btn_row = QtWidgets.QHBoxLayout()
         self.new_btn = QtWidgets.QPushButton(self.t("btn.new", "New"))
@@ -1057,8 +1075,11 @@ class VCliQtApp(QtWidgets.QMainWindow):
         self.tabs = QtWidgets.QTabWidget()
         right_layout.addWidget(self.tabs, 1)
         self._build_code_tab()
+        self._build_docs_tab()
         self._build_boards_tab()
         self._build_libs_tab()
+        if self.git_available:
+            self._build_git_tab()
         self._build_serial_tab()
         self._build_cli_tab()
 
@@ -1073,6 +1094,7 @@ class VCliQtApp(QtWidgets.QMainWindow):
         split.addWidget(right)
         split.setStretchFactor(0, 3)
         split.setStretchFactor(1, 10)
+        split.setSizes([360, 1040])
 
         self.new_btn.clicked.connect(self.create_project)
         self.open_btn.clicked.connect(self.open_project)
@@ -1082,6 +1104,9 @@ class VCliQtApp(QtWidgets.QMainWindow):
         self.tabs.currentChanged.connect(lambda *_: self._refresh_board_updates_indicator())
         self._update_project_actions_enabled(False)
         self.apply_app_settings_to_ui()
+        self._refresh_docs_ui()
+        if self.git_available:
+            self._refresh_git_ui()
 
     def _build_menu_bar(self):
         menu_bar = self.menuBar()
@@ -1111,6 +1136,7 @@ class VCliQtApp(QtWidgets.QMainWindow):
         self.action_open_csv_log = QtWidgets.QAction("Lista de logs do projeto", self)
         self.action_open_external_log = QtWidgets.QAction("Abrir log externo", self)
         self.action_code_editor = QtWidgets.QAction("Code Editor", self)
+        self.action_docs_editor = QtWidgets.QAction("Editor da documentação", self)
         link_arduino = QtWidgets.QAction("Arduino CLI", self)
         link_python = QtWidgets.QAction("Python", self)
         link_pyqt = QtWidgets.QAction("PyQt5", self)
@@ -1118,6 +1144,7 @@ class VCliQtApp(QtWidgets.QMainWindow):
         tools_menu.addAction(self.action_open_csv_log)
         tools_menu.addAction(self.action_open_external_log)
         tools_menu.addAction(self.action_code_editor)
+        tools_menu.addAction(self.action_docs_editor)
         vcli_menu.addAction(settings_action)
         vcli_menu.addAction(about_action)
         vcli_menu.addSeparator()
@@ -1137,6 +1164,7 @@ class VCliQtApp(QtWidgets.QMainWindow):
         self.action_open_csv_log.triggered.connect(self.open_csv_log_viewer)
         self.action_open_external_log.triggered.connect(self.open_external_csv_log_viewer)
         self.action_code_editor.triggered.connect(self.open_code_editor_dialog)
+        self.action_docs_editor.triggered.connect(self.open_docs_editor_dialog)
         settings_action.triggered.connect(self.open_settings_dialog)
         about_action.triggered.connect(self.show_about_dialog)
         link_arduino.triggered.connect(lambda: webbrowser.open("https://arduino.github.io/arduino-cli/latest/"))
@@ -1186,6 +1214,7 @@ class VCliQtApp(QtWidgets.QMainWindow):
         form_layout.addLayout(self._build_setting_row(self.t("cfg.name", "Name:"), self.project_name_label, [
             ("...", self.edit_project_name),
             (self.t("btn.properties", "Properties"), self.edit_project_properties),
+            ("README", self.show_project_readme),
         ]))
         form_layout.addLayout(self._build_setting_row(self.t("cfg.board", "Board:"), self.board_display, [
             ("...", self.open_boards_dialog),
@@ -1256,6 +1285,38 @@ class VCliQtApp(QtWidgets.QMainWindow):
         self.boards_table.itemDoubleClicked.connect(lambda *_: self.apply_selected_board())
         self.tabs.addTab(tab, self.t("tab.boards", "Boards"))
 
+    def _build_docs_tab(self):
+        tab = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(tab)
+        header = QtWidgets.QHBoxLayout()
+        self.docs_refresh_btn = QtWidgets.QPushButton("Atualizar")
+        self.docs_open_folder_btn = QtWidgets.QPushButton("Abrir DOCS")
+        for widget in [self.docs_refresh_btn, self.docs_open_folder_btn]:
+            header.addWidget(widget)
+        header.addStretch(1)
+        layout.addLayout(header)
+
+        docs_split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        self.docs_list = QtWidgets.QListWidget()
+        self.docs_list.setIconSize(QtCore.QSize(28, 28))
+        self.docs_list.setMinimumWidth(220)
+        docs_split.addWidget(self.docs_list)
+        docs_right = QtWidgets.QWidget()
+        docs_right_layout = QtWidgets.QVBoxLayout(docs_right)
+        self.docs_content = QtWidgets.QTextBrowser()
+        self.docs_content.setOpenExternalLinks(True)
+        docs_right_layout.addWidget(self.docs_content, 1)
+        docs_split.addWidget(docs_right)
+        docs_split.setStretchFactor(0, 2)
+        docs_split.setStretchFactor(1, 7)
+        docs_split.setSizes([260, 900])
+        layout.addWidget(docs_split, 1)
+        self.tabs.addTab(tab, "Docs")
+
+        self.docs_refresh_btn.clicked.connect(self._refresh_docs_ui)
+        self.docs_open_folder_btn.clicked.connect(self._open_docs_folder)
+        self.docs_list.currentItemChanged.connect(lambda *_: self._show_selected_doc())
+
     def _build_libs_tab(self):
         tab = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(tab)
@@ -1279,6 +1340,445 @@ class VCliQtApp(QtWidgets.QMainWindow):
         self.libs_zip_btn.clicked.connect(self.install_library_zip)
         self.libs_manager_btn.clicked.connect(self.open_library_manager)
         self.tabs.addTab(tab, self.t("tab.libs", "Libraries"))
+
+    def _build_git_tab(self):
+        return self._build_git_tab_v2()
+
+    def _build_git_tab_v2(self):
+        return self._build_git_tab_v3()
+
+    def _build_git_tab_v3(self):
+        return self._build_git_tab_v4()
+
+    def _build_git_tab_v4(self):
+        return self._build_git_tab_v5()
+
+    def _build_git_tab_v5(self):
+        return self._build_git_tab_v6()
+
+    def _build_git_tab_v6(self):
+        tab = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(tab)
+        info = QtWidgets.QLabel("Git do projeto atual com branch, arquivos alterados, histórico e diff.")
+        info.setStyleSheet("color: #5b7288;")
+        layout.addWidget(info)
+
+        self.git_views = QtWidgets.QTabWidget()
+        self.git_views.setTabPosition(QtWidgets.QTabWidget.West)
+
+        main_page = QtWidgets.QWidget()
+        main_layout = QtWidgets.QVBoxLayout(main_page)
+        top_row = QtWidgets.QHBoxLayout()
+        self.git_branch_label = QtWidgets.QLabel("Branch: -")
+        self.git_state_label = QtWidgets.QLabel("Estado: -")
+        self.git_refresh_btn = QtWidgets.QPushButton("Atualizar")
+        self.git_branch_combo = QtWidgets.QComboBox()
+        self.git_checkout_branch_btn = QtWidgets.QPushButton("Trocar")
+        self.git_new_branch_btn = QtWidgets.QPushButton("Nova branch")
+        top_row.addWidget(self.git_branch_label)
+        top_row.addWidget(self.git_state_label, 1)
+        top_row.addWidget(QtWidgets.QLabel("Branch:"))
+        top_row.addWidget(self.git_branch_combo, 1)
+        top_row.addWidget(self.git_checkout_branch_btn)
+        top_row.addWidget(self.git_new_branch_btn)
+        top_row.addWidget(self.git_refresh_btn)
+        main_layout.addLayout(top_row)
+
+        commit_row = QtWidgets.QHBoxLayout()
+        self.git_commit_edit = QtWidgets.QLineEdit()
+        self.git_commit_edit.setPlaceholderText("Mensagem de commit")
+        self.git_add_all_btn = QtWidgets.QPushButton("Add All")
+        self.git_commit_btn = QtWidgets.QPushButton("Commit")
+        commit_row.addWidget(QtWidgets.QLabel("Commit:"))
+        commit_row.addWidget(self.git_commit_edit, 1)
+        commit_row.addWidget(self.git_add_all_btn)
+        commit_row.addWidget(self.git_commit_btn)
+        main_layout.addLayout(commit_row)
+
+        main_split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        left_host = QtWidgets.QWidget()
+        left_layout = QtWidgets.QVBoxLayout(left_host)
+        left_layout.addWidget(QtWidgets.QLabel("Arquivos alterados"))
+        self.git_changed_files = QtWidgets.QTreeWidget()
+        self.git_changed_files.setHeaderLabels(["Arquivo", "Estado"])
+        self.git_changed_files.header().setSectionResizeMode(0, QtWidgets.QHeaderView.Stretch)
+        self.git_changed_files.header().setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeToContents)
+        left_layout.addWidget(self.git_changed_files, 1)
+        left_layout.addWidget(QtWidgets.QLabel("Histórico"))
+        self.git_commit_table = QtWidgets.QTableWidget(0, 4)
+        self.git_commit_table.setHorizontalHeaderLabels(["Estado", "Hash", "Quando", "Mensagem"])
+        self.git_commit_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.git_commit_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.git_commit_table.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        self.git_commit_table.horizontalHeader().setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeToContents)
+        self.git_commit_table.horizontalHeader().setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeToContents)
+        self.git_commit_table.horizontalHeader().setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeToContents)
+        self.git_commit_table.horizontalHeader().setSectionResizeMode(3, QtWidgets.QHeaderView.Stretch)
+        left_layout.addWidget(self.git_commit_table, 1)
+        main_split.addWidget(left_host)
+
+        right_host = QtWidgets.QWidget()
+        right_layout = QtWidgets.QVBoxLayout(right_host)
+        self.git_selected_hash_label = QtWidgets.QLabel("Hash selecionada: -")
+        right_layout.addWidget(self.git_selected_hash_label)
+        self.git_diff_mode_combo = QtWidgets.QComboBox()
+        self.git_diff_mode_combo.addItem("Diff do arquivo", "file")
+        self.git_diff_mode_combo.addItem("Diff do commit", "commit")
+        right_layout.addWidget(self.git_diff_mode_combo, 0)
+        self.git_diff_view = QtWidgets.QPlainTextEdit()
+        self.git_diff_view.setReadOnly(True)
+        right_layout.addWidget(self.git_diff_view, 1)
+        main_split.addWidget(right_host)
+        main_split.setStretchFactor(0, 4)
+        main_split.setStretchFactor(1, 5)
+        main_split.setSizes([520, 680])
+        main_layout.addWidget(main_split, 1)
+        self.git_views.addTab(main_page, "Main")
+
+        remote_page = QtWidgets.QWidget()
+        remote_layout = QtWidgets.QVBoxLayout(remote_page)
+        remote_summary = QtWidgets.QGridLayout()
+        self.git_remote_label = QtWidgets.QLabel("Remote atual: -")
+        self.git_remote_state_label = QtWidgets.QLabel("Remote: -")
+        self.git_sync_label = QtWidgets.QLabel("Sincronização: -")
+        self.git_sync_counts_label = QtWidgets.QLabel("Pendências: -")
+        remote_summary.addWidget(self.git_remote_label, 0, 0, 1, 2)
+        remote_summary.addWidget(self.git_remote_state_label, 1, 0)
+        remote_summary.addWidget(self.git_sync_label, 1, 1)
+        remote_summary.addWidget(self.git_sync_counts_label, 2, 0, 1, 2)
+        remote_layout.addLayout(remote_summary)
+        self.git_remote_edit = QtWidgets.QLineEdit()
+        self.git_remote_edit.setPlaceholderText("Remote URL")
+        self.git_set_remote_btn = QtWidgets.QPushButton("Set Remote")
+        remote_row = QtWidgets.QHBoxLayout()
+        remote_row.addWidget(QtWidgets.QLabel("Remote:"))
+        remote_row.addWidget(self.git_remote_edit, 1)
+        remote_row.addWidget(self.git_set_remote_btn)
+        remote_layout.addLayout(remote_row)
+        remote_buttons = QtWidgets.QHBoxLayout()
+        self.git_status_btn = QtWidgets.QPushButton("Status")
+        self.git_pull_btn = QtWidgets.QPushButton("Pull")
+        self.git_push_btn = QtWidgets.QPushButton("Push")
+        self.git_force_push_btn = QtWidgets.QPushButton("Force Push")
+        self.git_fetch_btn = QtWidgets.QPushButton("Fetch")
+        for widget in [self.git_status_btn, self.git_pull_btn, self.git_push_btn, self.git_force_push_btn, self.git_fetch_btn]:
+            remote_buttons.addWidget(widget)
+        remote_buttons.addStretch(1)
+        remote_layout.addLayout(remote_buttons)
+        remote_layout.addWidget(QtWidgets.QLabel("Histórico de operações"))
+        self.git_remote_history = QtWidgets.QPlainTextEdit()
+        self.git_remote_history.setReadOnly(True)
+        remote_layout.addWidget(self.git_remote_history, 1)
+        self.git_views.addTab(remote_page, "Remote")
+
+        admin_page = QtWidgets.QWidget()
+        admin_layout = QtWidgets.QVBoxLayout(admin_page)
+        self.git_admin_views = QtWidgets.QTabWidget()
+        self.git_admin_views.setTabPosition(QtWidgets.QTabWidget.West)
+
+        admin_local_page = QtWidgets.QWidget()
+        admin_local_layout = QtWidgets.QVBoxLayout(admin_local_page)
+        admin_local_buttons = QtWidgets.QHBoxLayout()
+        self.git_init_btn = QtWidgets.QPushButton("Init")
+        self.git_delete_branch_btn = QtWidgets.QPushButton("Excluir branch")
+        admin_local_buttons.addWidget(self.git_init_btn)
+        admin_local_buttons.addWidget(self.git_delete_branch_btn)
+        admin_local_buttons.addStretch(1)
+        admin_local_layout.addLayout(admin_local_buttons)
+        self.git_admin_target_edit = QtWidgets.QLineEdit()
+        self.git_admin_target_edit.setPlaceholderText("Branch local")
+        admin_local_layout.addWidget(self.git_admin_target_edit)
+        self.git_admin_views.addTab(admin_local_page, "Local")
+
+        admin_remote_page = QtWidgets.QWidget()
+        admin_remote_layout = QtWidgets.QVBoxLayout(admin_remote_page)
+        self.git_delete_remote_branch_btn = QtWidgets.QPushButton("Excluir branch remota")
+        self.git_admin_remote_target_edit = QtWidgets.QLineEdit()
+        self.git_admin_remote_target_edit.setPlaceholderText("Branch remota")
+        admin_remote_layout.addWidget(self.git_admin_remote_target_edit)
+        admin_remote_layout.addWidget(self.git_delete_remote_branch_btn, 0, QtCore.Qt.AlignLeft)
+        self.git_admin_views.addTab(admin_remote_page, "Remote")
+
+        admin_reset_page = QtWidgets.QWidget()
+        admin_reset_layout = QtWidgets.QVBoxLayout(admin_reset_page)
+        self.git_reset_hard_btn = QtWidgets.QPushButton("Reset hard")
+        self.git_reset_target_combo = QtWidgets.QComboBox()
+        self.git_reset_target_combo.setEditable(True)
+        self.git_reset_target_combo.setInsertPolicy(QtWidgets.QComboBox.NoInsert)
+        admin_reset_layout.addWidget(QtWidgets.QLabel("Hash/commit alvo"))
+        admin_reset_layout.addWidget(self.git_reset_target_combo)
+        admin_reset_layout.addWidget(self.git_reset_hard_btn, 0, QtCore.Qt.AlignLeft)
+        self.git_admin_views.addTab(admin_reset_page, "Reset")
+
+        admin_layout.addWidget(self.git_admin_views, 1)
+        self.git_views.addTab(admin_page, "Admin")
+
+        host_split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        self.git_output = QtWidgets.QPlainTextEdit()
+        self.git_output.setReadOnly(True)
+        self.git_output.setMaximumWidth(360)
+        host_split.addWidget(self.git_views)
+        host_split.addWidget(self.git_output)
+        host_split.setStretchFactor(0, 8)
+        host_split.setStretchFactor(1, 3)
+        host_split.setSizes([980, 320])
+        layout.addWidget(host_split, 1)
+
+        self.git_init_btn.clicked.connect(lambda: self._run_git_command(["init"]))
+        self.git_status_btn.clicked.connect(lambda: self._run_git_command(["status", "--short", "--branch"]))
+        self.git_add_all_btn.clicked.connect(lambda: self._run_git_command(["add", "."]))
+        self.git_commit_btn.clicked.connect(self._git_commit)
+        self.git_pull_btn.clicked.connect(lambda: self._run_git_command(["pull"]))
+        self.git_push_btn.clicked.connect(lambda: self._run_git_command(["push"]))
+        self.git_force_push_btn.clicked.connect(lambda: self._run_git_command(["push", "--force-with-lease"]))
+        self.git_fetch_btn.clicked.connect(lambda: self._run_git_command(["fetch", "--all", "--prune"]))
+        self.git_set_remote_btn.clicked.connect(self._git_set_remote)
+        self.git_refresh_btn.clicked.connect(self._refresh_git_ui)
+        self.git_commit_table.itemSelectionChanged.connect(self._update_git_selection_details)
+        self.git_commit_table.customContextMenuRequested.connect(self._open_git_commit_context_menu)
+        self.git_changed_files.itemSelectionChanged.connect(self._update_git_file_diff)
+        self.git_new_branch_btn.clicked.connect(self._git_create_branch_from_selected)
+        self.git_checkout_branch_btn.clicked.connect(self._git_checkout_branch)
+        self.git_diff_mode_combo.currentIndexChanged.connect(self._refresh_git_diff_view)
+        self.git_delete_branch_btn.clicked.connect(self._git_delete_branch)
+        self.git_delete_remote_branch_btn.clicked.connect(self._git_delete_remote_branch)
+        self.git_reset_hard_btn.clicked.connect(self._git_reset_hard)
+        self.tabs.addTab(tab, "Git")
+        return
+
+        tab = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(tab)
+        info = QtWidgets.QLabel("Git do projeto atual com branch, arquivos alterados, histórico e diff.")
+        info.setStyleSheet("color: #5b7288;")
+        layout.addWidget(info)
+
+        self.git_views = QtWidgets.QTabWidget()
+        self.git_views.setTabPosition(QtWidgets.QTabWidget.West)
+
+        main_page = QtWidgets.QWidget()
+        main_layout = QtWidgets.QVBoxLayout(main_page)
+        top_row = QtWidgets.QHBoxLayout()
+        self.git_branch_label = QtWidgets.QLabel("Branch: -")
+        self.git_state_label = QtWidgets.QLabel("Estado: -")
+        self.git_refresh_btn = QtWidgets.QPushButton("Atualizar")
+        self.git_branch_combo = QtWidgets.QComboBox()
+        self.git_checkout_branch_btn = QtWidgets.QPushButton("Trocar")
+        self.git_new_branch_btn = QtWidgets.QPushButton("Nova branch")
+        top_row.addWidget(self.git_branch_label)
+        top_row.addWidget(self.git_state_label, 1)
+        top_row.addWidget(QtWidgets.QLabel("Branch:"))
+        top_row.addWidget(self.git_branch_combo, 1)
+        top_row.addWidget(self.git_checkout_branch_btn)
+        top_row.addWidget(self.git_new_branch_btn)
+        top_row.addWidget(self.git_refresh_btn)
+        main_layout.addLayout(top_row)
+
+        commit_row = QtWidgets.QHBoxLayout()
+        self.git_commit_edit = QtWidgets.QLineEdit()
+        self.git_commit_edit.setPlaceholderText("Mensagem de commit")
+        self.git_add_all_btn = QtWidgets.QPushButton("Add All")
+        self.git_commit_btn = QtWidgets.QPushButton("Commit")
+        commit_row.addWidget(QtWidgets.QLabel("Commit:"))
+        commit_row.addWidget(self.git_commit_edit, 1)
+        commit_row.addWidget(self.git_add_all_btn)
+        commit_row.addWidget(self.git_commit_btn)
+        main_layout.addLayout(commit_row)
+
+        main_split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        left_host = QtWidgets.QWidget()
+        left_layout = QtWidgets.QVBoxLayout(left_host)
+        left_layout.addWidget(QtWidgets.QLabel("Arquivos alterados"))
+        self.git_changed_files = QtWidgets.QTreeWidget()
+        self.git_changed_files.setHeaderLabels(["Arquivo", "Estado"])
+        self.git_changed_files.header().setSectionResizeMode(0, QtWidgets.QHeaderView.Stretch)
+        self.git_changed_files.header().setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeToContents)
+        left_layout.addWidget(self.git_changed_files, 1)
+        left_layout.addWidget(QtWidgets.QLabel("Histórico"))
+        self.git_commit_table = QtWidgets.QTableWidget(0, 4)
+        self.git_commit_table.setHorizontalHeaderLabels(["Estado", "Hash", "Quando", "Mensagem"])
+        self.git_commit_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.git_commit_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.git_commit_table.horizontalHeader().setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeToContents)
+        self.git_commit_table.horizontalHeader().setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeToContents)
+        self.git_commit_table.horizontalHeader().setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeToContents)
+        self.git_commit_table.horizontalHeader().setSectionResizeMode(3, QtWidgets.QHeaderView.Stretch)
+        left_layout.addWidget(self.git_commit_table, 1)
+        main_split.addWidget(left_host)
+
+        right_host = QtWidgets.QWidget()
+        right_layout = QtWidgets.QVBoxLayout(right_host)
+        hash_row = QtWidgets.QHBoxLayout()
+        self.git_selected_hash_label = QtWidgets.QLabel("Hash selecionada: -")
+        self.git_copy_hash_btn = QtWidgets.QPushButton("Copiar hash")
+        self.git_copy_short_hash_btn = QtWidgets.QPushButton("Copiar curta")
+        hash_row.addWidget(self.git_selected_hash_label, 1)
+        hash_row.addWidget(self.git_copy_hash_btn)
+        hash_row.addWidget(self.git_copy_short_hash_btn)
+        right_layout.addLayout(hash_row)
+        self.git_diff_mode_combo = QtWidgets.QComboBox()
+        self.git_diff_mode_combo.addItem("Diff do arquivo", "file")
+        self.git_diff_mode_combo.addItem("Diff do commit", "commit")
+        right_layout.addWidget(self.git_diff_mode_combo, 0)
+        self.git_diff_view = QtWidgets.QPlainTextEdit()
+        self.git_diff_view.setReadOnly(True)
+        right_layout.addWidget(self.git_diff_view, 1)
+        main_split.addWidget(right_host)
+        main_split.setStretchFactor(0, 4)
+        main_split.setStretchFactor(1, 5)
+        main_split.setSizes([520, 680])
+        main_layout.addWidget(main_split, 1)
+        self.git_views.addTab(main_page, "Main")
+
+        remote_page = QtWidgets.QWidget()
+        remote_layout = QtWidgets.QVBoxLayout(remote_page)
+        remote_summary = QtWidgets.QGridLayout()
+        self.git_remote_label = QtWidgets.QLabel("Remote atual: -")
+        self.git_remote_state_label = QtWidgets.QLabel("Remote: -")
+        self.git_sync_label = QtWidgets.QLabel("Sincronização: -")
+        self.git_sync_counts_label = QtWidgets.QLabel("Pendências: -")
+        remote_summary.addWidget(self.git_remote_label, 0, 0, 1, 2)
+        remote_summary.addWidget(self.git_remote_state_label, 1, 0)
+        remote_summary.addWidget(self.git_sync_label, 1, 1)
+        remote_summary.addWidget(self.git_sync_counts_label, 2, 0, 1, 2)
+        remote_layout.addLayout(remote_summary)
+        self.git_remote_edit = QtWidgets.QLineEdit()
+        self.git_remote_edit.setPlaceholderText("Remote URL")
+        self.git_set_remote_btn = QtWidgets.QPushButton("Set Remote")
+        remote_row = QtWidgets.QHBoxLayout()
+        remote_row.addWidget(QtWidgets.QLabel("Remote:"))
+        remote_row.addWidget(self.git_remote_edit, 1)
+        remote_row.addWidget(self.git_set_remote_btn)
+        remote_layout.addLayout(remote_row)
+        remote_buttons = QtWidgets.QHBoxLayout()
+        self.git_status_btn = QtWidgets.QPushButton("Status")
+        self.git_pull_btn = QtWidgets.QPushButton("Pull")
+        self.git_push_btn = QtWidgets.QPushButton("Push")
+        self.git_force_push_btn = QtWidgets.QPushButton("Force Push")
+        self.git_fetch_btn = QtWidgets.QPushButton("Fetch")
+        for widget in [self.git_status_btn, self.git_pull_btn, self.git_push_btn, self.git_force_push_btn, self.git_fetch_btn]:
+            remote_buttons.addWidget(widget)
+        remote_buttons.addStretch(1)
+        remote_layout.addLayout(remote_buttons)
+        self.git_views.addTab(remote_page, "Remote")
+
+        admin_page = QtWidgets.QWidget()
+        admin_layout = QtWidgets.QVBoxLayout(admin_page)
+        admin_buttons = QtWidgets.QHBoxLayout()
+        self.git_init_btn = QtWidgets.QPushButton("Init")
+        self.git_delete_branch_btn = QtWidgets.QPushButton("Excluir branch")
+        self.git_delete_remote_branch_btn = QtWidgets.QPushButton("Excluir branch remota")
+        self.git_reset_hard_btn = QtWidgets.QPushButton("Reset hard")
+        for widget in [self.git_init_btn, self.git_delete_branch_btn, self.git_delete_remote_branch_btn, self.git_reset_hard_btn]:
+            admin_buttons.addWidget(widget)
+        admin_buttons.addStretch(1)
+        admin_layout.addLayout(admin_buttons)
+        self.git_admin_target_edit = QtWidgets.QLineEdit()
+        self.git_admin_target_edit.setPlaceholderText("Branch, remote branch ou hash alvo")
+        admin_layout.addWidget(self.git_admin_target_edit)
+        admin_layout.addWidget(QtWidgets.QLabel("Área administrativa: ações perigosas, sempre com confirmação."))
+        self.git_views.addTab(admin_page, "Admin")
+
+        layout.addWidget(self.git_views, 1)
+
+        self.git_output = QtWidgets.QPlainTextEdit()
+        self.git_output.setReadOnly(True)
+        layout.addWidget(self.git_output, 1)
+
+        self.git_init_btn.setToolTip("Inicializa um repositório Git neste projeto.")
+        self.git_status_btn.setToolTip("Mostra o status atual do repositório.")
+        self.git_add_all_btn.setToolTip("Adiciona todas as alterações ao stage.")
+        self.git_commit_btn.setToolTip("Cria um commit com a mensagem informada.")
+        self.git_pull_btn.setToolTip("Busca e integra alterações do remote.")
+        self.git_push_btn.setToolTip("Envia commits locais para o remote.")
+        self.git_force_push_btn.setToolTip("Envia commits com --force-with-lease.")
+        self.git_fetch_btn.setToolTip("Atualiza referências do remote sem mesclar.")
+        self.git_set_remote_btn.setToolTip("Define ou substitui o remote origin.")
+        self.git_delete_branch_btn.setToolTip("Exclui uma branch local.")
+        self.git_delete_remote_branch_btn.setToolTip("Exclui uma branch no remote.")
+        self.git_reset_hard_btn.setToolTip("Faz git reset --hard para a hash informada.")
+
+        self.git_init_btn.clicked.connect(lambda: self._run_git_command(["init"]))
+        self.git_status_btn.clicked.connect(lambda: self._run_git_command(["status", "--short", "--branch"]))
+        self.git_add_all_btn.clicked.connect(lambda: self._run_git_command(["add", "."]))
+        self.git_commit_btn.clicked.connect(self._git_commit)
+        self.git_pull_btn.clicked.connect(lambda: self._run_git_command(["pull"]))
+        self.git_push_btn.clicked.connect(lambda: self._run_git_command(["push"]))
+        self.git_force_push_btn.clicked.connect(lambda: self._run_git_command(["push", "--force-with-lease"]))
+        self.git_fetch_btn.clicked.connect(lambda: self._run_git_command(["fetch", "--all", "--prune"]))
+        self.git_set_remote_btn.clicked.connect(self._git_set_remote)
+        self.git_refresh_btn.clicked.connect(self._refresh_git_ui)
+        self.git_commit_table.itemSelectionChanged.connect(self._update_git_selection_details)
+        self.git_changed_files.itemSelectionChanged.connect(self._update_git_file_diff)
+        self.git_copy_hash_btn.clicked.connect(lambda: self._copy_selected_git_hash(short=False))
+        self.git_copy_short_hash_btn.clicked.connect(lambda: self._copy_selected_git_hash(short=True))
+        self.git_new_branch_btn.clicked.connect(self._git_create_branch_from_selected)
+        self.git_checkout_branch_btn.clicked.connect(self._git_checkout_branch)
+        self.git_diff_mode_combo.currentIndexChanged.connect(self._refresh_git_diff_view)
+        self.git_delete_branch_btn.clicked.connect(self._git_delete_branch)
+        self.git_delete_remote_branch_btn.clicked.connect(self._git_delete_remote_branch)
+        self.git_reset_hard_btn.clicked.connect(self._git_reset_hard)
+        self.tabs.addTab(tab, "Git")
+        return
+
+        tab = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(tab)
+        info = QtWidgets.QLabel("Controle Git simples do projeto atual.")
+        info.setStyleSheet("color: #5b7288;")
+        layout.addWidget(info)
+        top = QtWidgets.QHBoxLayout()
+        self.git_init_btn = QtWidgets.QPushButton("Init")
+        self.git_status_btn = QtWidgets.QPushButton("Status")
+        self.git_add_all_btn = QtWidgets.QPushButton("Add All")
+        self.git_commit_btn = QtWidgets.QPushButton("Commit")
+        self.git_pull_btn = QtWidgets.QPushButton("Pull")
+        self.git_push_btn = QtWidgets.QPushButton("Push")
+        self.git_force_push_btn = QtWidgets.QPushButton("Force Push")
+        for widget in [self.git_init_btn, self.git_status_btn, self.git_add_all_btn, self.git_commit_btn, self.git_pull_btn, self.git_push_btn]:
+            top.addWidget(widget)
+        top.addWidget(self.git_force_push_btn)
+        top.addStretch(1)
+        layout.addLayout(top)
+
+        remote_row = QtWidgets.QHBoxLayout()
+        self.git_remote_edit = QtWidgets.QLineEdit()
+        self.git_remote_edit.setPlaceholderText("Remote URL")
+        self.git_set_remote_btn = QtWidgets.QPushButton("Set Remote")
+        self.git_remote_label = QtWidgets.QLabel("Remote atual: -")
+        remote_row.addWidget(QtWidgets.QLabel("Remote:"))
+        remote_row.addWidget(self.git_remote_edit, 1)
+        remote_row.addWidget(self.git_set_remote_btn)
+        remote_row.addWidget(self.git_remote_label)
+        layout.addLayout(remote_row)
+
+        commit_row = QtWidgets.QHBoxLayout()
+        self.git_commit_edit = QtWidgets.QLineEdit()
+        self.git_commit_edit.setPlaceholderText("Mensagem de commit")
+        commit_row.addWidget(QtWidgets.QLabel("Commit:"))
+        commit_row.addWidget(self.git_commit_edit, 1)
+        layout.addLayout(commit_row)
+
+        self.git_output = QtWidgets.QPlainTextEdit()
+        self.git_output.setReadOnly(True)
+        layout.addWidget(self.git_output, 1)
+
+        self.git_init_btn.setToolTip("Inicializa um repositório Git neste projeto.")
+        self.git_status_btn.setToolTip("Mostra o status atual do repositório.")
+        self.git_add_all_btn.setToolTip("Adiciona todas as alterações ao stage.")
+        self.git_commit_btn.setToolTip("Cria um commit com a mensagem informada.")
+        self.git_pull_btn.setToolTip("Busca e integra alterações do remote.")
+        self.git_push_btn.setToolTip("Envia commits locais para o remote.")
+        self.git_force_push_btn.setToolTip("Envia commits com --force-with-lease.")
+        self.git_set_remote_btn.setToolTip("Define ou substitui o remote origin.")
+
+        self.git_init_btn.clicked.connect(lambda: self._run_git_command(["init"]))
+        self.git_status_btn.clicked.connect(lambda: self._run_git_command(["status", "--short", "--branch"]))
+        self.git_add_all_btn.clicked.connect(lambda: self._run_git_command(["add", "."]))
+        self.git_commit_btn.clicked.connect(self._git_commit)
+        self.git_pull_btn.clicked.connect(lambda: self._run_git_command(["pull"]))
+        self.git_push_btn.clicked.connect(lambda: self._run_git_command(["push"]))
+        self.git_force_push_btn.clicked.connect(lambda: self._run_git_command(["push", "--force-with-lease"]))
+        self.git_set_remote_btn.clicked.connect(self._git_set_remote)
+        self.tabs.addTab(tab, "Git")
 
     def _build_serial_tab(self):
         tab = QtWidgets.QWidget()
@@ -1481,6 +1981,8 @@ class VCliQtApp(QtWidgets.QMainWindow):
         cfg.setdefault("command_compile_template", "vcli.cmd compile \"{project}\"")
         cfg.setdefault("command_export_template", "vcli.cmd export \"{project}\"")
         cfg.setdefault("command_upload_template", "vcli.cmd upload \"{project}\" --port {port}")
+        cfg.setdefault("inocli_mode", "bundled")
+        cfg.setdefault("inocli_custom_path", "")
         return cfg
 
     def _save_app_settings(self):
@@ -1501,6 +2003,28 @@ class VCliQtApp(QtWidgets.QMainWindow):
         )
         if hasattr(self, "action_vscode"):
             self.action_vscode.setText(editor_title)
+        self._apply_backend_cli_settings()
+
+    def _bundled_inocli_path(self) -> Path:
+        return Path.cwd() / "arduino-cli.exe"
+
+    def _resolve_inocli_path(self) -> Path:
+        settings = self._ensure_app_setting_defaults(self.app_settings)
+        mode = str(settings.get("inocli_mode", "bundled") or "bundled").strip()
+        if mode == "path":
+            found = shutil.which("arduino-cli")
+            if found:
+                return Path(found)
+        if mode == "custom":
+            custom = str(settings.get("inocli_custom_path", "") or "").strip()
+            if custom:
+                return Path(custom)
+        return self._bundled_inocli_path()
+
+    def _apply_backend_cli_settings(self):
+        if not self.backend:
+            return
+        self.backend.cli_path = self._resolve_inocli_path()
 
     def _editor_command(self) -> str:
         return str(self.app_settings.get("editor_command", "code") or "code").strip()
@@ -1521,6 +2045,28 @@ class VCliQtApp(QtWidgets.QMainWindow):
             if entry.strip().lower() == base_dir:
                 return True
         return False
+
+    def _set_vcli_path_registration(self, enabled: bool) -> tuple[bool, str]:
+        if winreg is None:
+            return False, "Registro do Windows não disponível."
+        try:
+            base_dir = str(Path.cwd())
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Environment", 0, winreg.KEY_READ | winreg.KEY_WRITE) as key:
+                current_path, _ = winreg.QueryValueEx(key, "Path")
+                entries = [entry for entry in str(current_path or "").split(os.pathsep) if entry.strip()]
+                normalized = [entry.lower() for entry in entries]
+                if enabled and base_dir.lower() not in normalized:
+                    entries.append(base_dir)
+                if not enabled:
+                    entries = [entry for entry in entries if entry.strip().lower() != base_dir.lower()]
+                new_value = os.pathsep.join(entries)
+                winreg.SetValueEx(key, "Path", 0, winreg.REG_EXPAND_SZ, new_value)
+            os.environ["PATH"] = new_value
+            return True, "PATH atualizado com sucesso."
+        except FileNotFoundError:
+            return False, "Chave de ambiente não encontrada."
+        except Exception as exc:
+            return False, str(exc)
 
     def _list_project_source_files(self) -> list:
         if not self.current_project or not self.current_project.exists():
@@ -1602,6 +2148,7 @@ class VCliQtApp(QtWidgets.QMainWindow):
             getattr(self, "action_properties", None),
             getattr(self, "action_open_csv_log", None),
             getattr(self, "action_code_editor", None),
+            getattr(self, "action_docs_editor", None),
         ]:
             if action:
                 action.setEnabled(enabled)
@@ -1619,7 +2166,935 @@ class VCliQtApp(QtWidgets.QMainWindow):
         props.setdefault("autoversion_file", "")
         props.setdefault("autoversion_variable", "VERSION")
         props.setdefault("autoversion_kind", "string")
+        props.setdefault("autoversion_value_mode", "increment")
+        props.setdefault("autoversion_lua_script", self._default_autoversion_lua_script())
+        props.setdefault("batch_mode", "disabled")
+        props.setdefault("batch_file", "")
+        props.setdefault("batch_variable", "LOT")
+        props.setdefault("batch_kind", "string")
+        props.setdefault("batch_value_mode", "preset")
+        props.setdefault("batch_pattern", "date_time")
+        props.setdefault("batch_lua_script", self._default_batch_lua_script())
+        props["compile_questions"] = self._normalize_compile_questions(props.get("compile_questions", []))
         return props
+
+    def _default_batch_lua_script(self) -> str:
+        return (
+            "-- Use a tabela ctx para montar o lote.\n"
+            "-- Campos úteis: ctx.date_compact, ctx.time_compact, ctx.timestamp_compact,\n"
+            "-- ctx.year, ctx.month, ctx.day, ctx.hour, ctx.minute, ctx.second,\n"
+            "-- ctx.iso_week, ctx.project_name, ctx.version, ctx.action.\n"
+            "return ctx.timestamp_compact\n"
+        )
+
+    def _default_autoversion_lua_script(self) -> str:
+        return (
+            "-- Recebe ctx.current_value, ctx.kind, ctx.action e dados de tempo.\n"
+            "-- Retorne a nova versão como string.\n"
+            "return ctx.current_value\n"
+        )
+
+    def _normalize_compile_questions(self, questions) -> list:
+        items = list(questions or [])
+        normalized = []
+        for index in range(4):
+            raw = items[index] if index < len(items) and isinstance(items[index], dict) else {}
+            normalized.append({
+                "enabled": bool(raw.get("enabled", False)),
+                "label": str(raw.get("label", "") or "").strip(),
+                "file": str(raw.get("file", "") or "").strip(),
+                "variable": str(raw.get("variable", "") or "").strip(),
+                "kind": str(raw.get("kind", "string") or "string").strip(),
+                "options_text": str(raw.get("options_text", "") or "").strip(),
+                "allow_keep": bool(raw.get("allow_keep", True)),
+            })
+        return normalized
+
+    def _split_configured_values(self, raw_text: str) -> list[str]:
+        values = []
+        for token in re.split(r"[\r\n,;|]+", str(raw_text or "")):
+            cleaned = token.strip()
+            if cleaned and cleaned not in values:
+                values.append(cleaned)
+        return values
+
+    def _build_time_context(self, action_name: str = "", now: datetime | None = None) -> dict:
+        props = self._ensure_project_property_defaults()
+        current = now or datetime.now()
+        iso_year, iso_week, iso_weekday = current.isocalendar()
+        return {
+            "action": str(action_name or "").strip(),
+            "project_name": self.current_project.name if self.current_project else "",
+            "version": str(props.get("version", "1.0.0") or "1.0.0").strip(),
+            "year": current.year,
+            "month": current.month,
+            "day": current.day,
+            "hour": current.hour,
+            "minute": current.minute,
+            "second": current.second,
+            "microsecond": current.microsecond,
+            "weekday": current.isoweekday(),
+            "day_of_year": int(current.strftime("%j")),
+            "iso_year": iso_year,
+            "iso_week": iso_week,
+            "iso_weekday": iso_weekday,
+            "date_compact": current.strftime("%Y%m%d"),
+            "time_compact": current.strftime("%H%M%S"),
+            "timestamp_compact": current.strftime("%Y%m%d-%H%M%S"),
+            "iso_stamp": current.isoformat(timespec="seconds"),
+        }
+
+    def _generate_batch_value(self, action_name: str = "export", now: datetime | None = None) -> str:
+        props = self._ensure_project_property_defaults()
+        current = now or datetime.now()
+        value_mode = str(props.get("batch_value_mode", "preset") or "preset").strip()
+        pattern = str(props.get("batch_pattern", "date_time") or "date_time").strip()
+        if value_mode != "lua":
+            if pattern == "date":
+                return current.strftime("%Y%m%d")
+            if pattern == "time":
+                return current.strftime("%H%M%S")
+            if pattern == "iso_week":
+                return current.strftime("%Y-W%W-%u")
+            return current.strftime("%Y%m%d-%H%M%S")
+        if LuaRuntime is None:
+            raise RuntimeError("Lupa/Lua não está disponível nesta instalação.")
+        script = str(props.get("batch_lua_script", "") or "").strip() or self._default_batch_lua_script()
+        context = self._build_time_context(action_name=action_name, now=current)
+        lua = LuaRuntime(unpack_returned_tuples=True)
+        lua.globals()["ctx"] = lua.table_from(context)
+        lua.globals()["strftime"] = lambda fmt: current.strftime(str(fmt))
+        result = lua.execute(script)
+        if result is None:
+            generator = getattr(lua.globals(), "generate", None)
+            if generator is not None:
+                result = generator(lua.table_from(context))
+        if result is None:
+            raise ValueError("O script Lua não retornou nenhum valor.")
+        return str(result).strip()
+
+    def _run_batch_autofill(self, action_name: str) -> tuple[bool, str]:
+        if not self.current_project or not self.current_config:
+            return True, ""
+        props = self._ensure_project_property_defaults()
+        mode = str(props.get("batch_mode", "disabled") or "disabled").strip()
+        allowed = {
+            "always_export": {"export"},
+            "always_upload": {"upload"},
+            "always_both": {"export", "upload"},
+            "ask_export": {"export"},
+            "ask_upload": {"upload"},
+            "ask_both": {"export", "upload"},
+        }.get(mode, set())
+        if action_name not in allowed:
+            return True, ""
+        if mode.startswith("ask_"):
+            label = "exportar binário" if action_name == "export" else "fazer upload"
+            answer = QtWidgets.QMessageBox.question(self, "Lote", f"Deseja atualizar o lote antes de {label}?")
+            if answer != QtWidgets.QMessageBox.Yes:
+                return True, ""
+        batch_file = str(props.get("batch_file", "") or "").strip()
+        batch_variable = str(props.get("batch_variable", "LOT") or "LOT").strip()
+        batch_kind = str(props.get("batch_kind", "string") or "string").strip()
+        if not batch_file or not batch_variable:
+            return False, "Configure o arquivo e a variável do lote antes de exportar."
+        try:
+            batch_value = self._generate_batch_value(action_name=action_name)
+        except Exception as exc:
+            return False, f"Falha ao gerar o lote: {exc}"
+        if batch_kind == "number" and not str(batch_value).isdigit():
+            return False, f"O lote está configurado como número, mas o script gerou '{batch_value}'."
+        target_file = (self.current_project / batch_file).resolve()
+        try:
+            updated = self._update_version_in_source_file(target_file, batch_variable, batch_value, value_kind=batch_kind)
+        except Exception as exc:
+            return False, f"Falha ao atualizar o lote: {exc}"
+        if not updated:
+            return False, f"Não encontrei a variável '{batch_variable}' em '{batch_file}' para atualizar o lote."
+        self.log(f"[LOTE] {batch_variable} -> {batch_value}")
+        return True, batch_value
+
+    def _run_precompile_questions(self) -> tuple[bool, str]:
+        if not self.current_project or not self.current_config:
+            return True, ""
+        props = self._ensure_project_property_defaults()
+        questions = self._normalize_compile_questions(props.get("compile_questions", []))
+        changed = False
+        for index, question in enumerate(questions, start=1):
+            if not question.get("enabled"):
+                continue
+            relative_file = str(question.get("file", "") or "").strip()
+            variable_name = str(question.get("variable", "") or "").strip()
+            value_kind = str(question.get("kind", "string") or "string").strip()
+            option_values = self._split_configured_values(question.get("options_text", ""))
+            if not relative_file or not variable_name or not option_values:
+                continue
+            current_value = self._read_version_from_source_file((self.current_project / relative_file).resolve(), variable_name, value_kind=value_kind)
+            prompt_label = str(question.get("label", "") or "").strip() or f"Pergunta {index}"
+            choices = list(option_values)
+            keep_label = f"Manter valor atual ({current_value or 'vazio'})"
+            default_index = 0
+            if question.get("allow_keep", True):
+                choices.insert(0, keep_label)
+            elif current_value and current_value in choices:
+                default_index = choices.index(current_value)
+            selected, ok = QtWidgets.QInputDialog.getItem(
+                self,
+                "Perguntas de compilação",
+                f"{prompt_label}\n\nValor atual: {current_value or 'vazio'}",
+                choices,
+                default_index,
+                False,
+            )
+            if not ok:
+                return False, "Compilação cancelada nas perguntas pré-compilação."
+            if question.get("allow_keep", True) and selected == keep_label:
+                continue
+            target_file = (self.current_project / relative_file).resolve()
+            try:
+                updated = self._update_version_in_source_file(target_file, variable_name, selected, value_kind=value_kind)
+            except Exception as exc:
+                return False, f"Falha ao aplicar '{prompt_label}': {exc}"
+            if not updated:
+                return False, f"Não encontrei o campo configurado para '{prompt_label}' em '{relative_file}'."
+            self.log(f"[BUILD-QUESTION] {prompt_label} -> {selected}")
+            changed = True
+        if changed:
+            self.save_config()
+        return True, ""
+
+    def _read_version_from_source_file(self, target_file: Path, variable_name: str, value_kind: str = "string") -> str:
+        if not target_file.exists():
+            return ""
+        content = target_file.read_text(encoding="utf-8", errors="replace")
+        escaped_var = re.escape(variable_name.strip() or "VERSION")
+        patterns = [
+            rf'((?:const\s+)?char\s+{escaped_var}\s*\[\s*\]\s*=\s*")([^"]*)(")',
+            rf'(#define\s+{escaped_var}\s+")([^"]*)(")',
+            rf'(\b{escaped_var}\b\s*=\s*")([^"]*)(")',
+            rf"(\b{escaped_var}\b\s*=\s*')([^']*)(')",
+            rf'(#define\s+{escaped_var}\s+)([0-9]+)',
+            rf'(\b{escaped_var}\b\s*=\s*)([0-9]+)',
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, content)
+            if match:
+                return str(match.group(2)).strip()
+        return ""
+
+    def _sync_version_from_source(self):
+        if not self.current_project or not self.current_config:
+            return
+        props = self._ensure_project_property_defaults()
+        version_file = str(props.get("autoversion_file", "") or "").strip()
+        version_variable = str(props.get("autoversion_variable", "VERSION") or "VERSION").strip()
+        value_kind = str(props.get("autoversion_kind", "string") or "string").strip()
+        if not version_file:
+            return
+        source_value = self._read_version_from_source_file(self.current_project / version_file, version_variable, value_kind=value_kind)
+        if source_value:
+            props["version"] = source_value
+
+    def _refresh_git_ui(self):
+        if not self.git_available or not hasattr(self, "git_init_btn"):
+            return
+        project_ready = bool(self.current_project)
+        repo_ready = False
+        if project_ready:
+            ok_git, _, _ = self._git_capture(["rev-parse", "--git-dir"])
+            repo_ready = ok_git
+        current_remote = "-"
+        if repo_ready:
+            _, current_remote_out, _ = self._git_capture(["remote", "get-url", "origin"])
+            current_remote = current_remote_out or "-"
+
+        self.git_init_btn.setVisible(not repo_ready)
+        for widget in [
+            self.git_status_btn,
+            self.git_add_all_btn,
+            self.git_commit_btn,
+            self.git_pull_btn,
+            self.git_push_btn,
+            self.git_force_push_btn,
+            self.git_set_remote_btn,
+            self.git_remote_edit,
+            getattr(self, "git_fetch_btn", None),
+            getattr(self, "git_refresh_btn", None),
+        ]:
+            if widget:
+                widget.setVisible(repo_ready or widget in {getattr(self, "git_refresh_btn", None)})
+                widget.setEnabled(project_ready)
+        self.git_remote_label.setText(f"Remote atual: {current_remote}")
+        if hasattr(self, "git_remote_history"):
+            self.git_remote_history.clear()
+            self.git_remote_history.appendPlainText(f"Remote: {current_remote}")
+
+        if hasattr(self, "git_branch_combo"):
+            self.git_branch_combo.blockSignals(True)
+            self.git_branch_combo.clear()
+            ok_branches, branches_out, _ = self._git_capture(["branch", "--format", "%(refname:short)"])
+            if ok_branches:
+                branches = [line.strip() for line in branches_out.splitlines() if line.strip()]
+                for branch in branches:
+                    self.git_branch_combo.addItem(branch)
+            self.git_branch_combo.blockSignals(False)
+
+        if hasattr(self, "git_commit_table"):
+            self.git_commit_table.setRowCount(0)
+        if hasattr(self, "git_changed_files"):
+            self.git_changed_files.clear()
+        if hasattr(self, "git_diff_view"):
+            self.git_diff_view.clear()
+        if hasattr(self, "git_branch_label"):
+            self.git_branch_label.setText("Branch: -")
+            self.git_state_label.setText("Estado: sem repositório")
+            self.git_selected_hash_label.setText("Hash selecionada: -")
+        if hasattr(self, "git_reset_target_combo"):
+            self.git_reset_target_combo.clear()
+        if hasattr(self, "git_sync_label"):
+            self.git_sync_label.setText("Sincronização: -")
+            self.git_sync_counts_label.setText("Pendências: -")
+            self.git_remote_state_label.setText(f"Remote: {current_remote}")
+
+        if not repo_ready:
+            return
+
+        _, branch_name, _ = self._git_capture(["branch", "--show-current"])
+        _, status_out, _ = self._git_capture(["status", "--short", "--branch"])
+        changed_lines = [line for line in status_out.splitlines() if line and not line.startswith("##")]
+        upstream = ""
+        ok_upstream, upstream_out, _ = self._git_capture(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"])
+        if ok_upstream:
+            upstream = upstream_out.strip()
+        ahead = behind = 0
+        if upstream:
+            ok_counts, counts_out, _ = self._git_capture(["rev-list", "--left-right", "--count", f"{upstream}...HEAD"])
+            if ok_counts:
+                parts = counts_out.split()
+                if len(parts) >= 2:
+                    behind = int(parts[0] or "0")
+                    ahead = int(parts[1] or "0")
+
+        sync_text = "sem upstream"
+        if upstream:
+            if ahead == 0 and behind == 0:
+                sync_text = "sincronizado com o remote"
+            else:
+                sync_text = f"{ahead} local / {behind} remoto"
+        self.git_branch_label.setText(f"Branch: {branch_name or '-'}")
+        if hasattr(self, "git_branch_combo"):
+            self.git_branch_combo.setCurrentIndex(max(0, self.git_branch_combo.findText(branch_name or "")))
+        self.git_state_label.setText("Estado: limpo" if not changed_lines else f"Estado: {len(changed_lines)} alteração(ões)")
+        self.git_sync_label.setText(f"Sincronização: {sync_text}")
+        self.git_sync_counts_label.setText(f"Pendências: {ahead} push / {behind} pull")
+        self.git_remote_state_label.setText(f"Remote: {current_remote}")
+        if hasattr(self, "git_remote_history"):
+            self.git_remote_history.appendPlainText(f"Branch atual: {branch_name or '-'}")
+            self.git_remote_history.appendPlainText(f"Sincronização: {sync_text}")
+            self.git_remote_history.appendPlainText(f"Pendências: {ahead} push / {behind} pull")
+
+        if hasattr(self, "git_changed_files"):
+            ok_name_status, name_status_out, _ = self._git_capture(["status", "--short"])
+            if ok_name_status:
+                for raw_line in name_status_out.splitlines():
+                    if not raw_line.strip():
+                        continue
+                    status_code = raw_line[:2].strip() or "?"
+                    file_name = raw_line[3:].strip()
+                    item = QtWidgets.QTreeWidgetItem([file_name, status_code])
+                    item.setData(0, QtCore.Qt.UserRole, file_name)
+                    self.git_changed_files.addTopLevelItem(item)
+
+        if hasattr(self, "git_commit_table"):
+            _, log_out, _ = self._git_capture(["log", "--pretty=format:%H%x1f%h%x1f%cr%x1f%s", "--max-count", "30", "HEAD"])
+            remote_shas = set()
+            if upstream:
+                _, remote_log, _ = self._git_capture(["rev-list", "--max-count", "200", upstream])
+                remote_shas = {line.strip() for line in remote_log.splitlines() if line.strip()}
+            rows = [line for line in log_out.splitlines() if line.strip()]
+            self.git_commit_table.setRowCount(len(rows))
+            for row_index, line in enumerate(rows):
+                sha, short_sha, rel_time, subject = (line.split("\x1f", 3) + ["", "", "", ""])[:4]
+                state = "Sim"
+                if upstream and sha not in remote_shas:
+                    state = "Só local"
+                elif not upstream:
+                    state = "Sem remote"
+                values = [state, short_sha, rel_time, subject]
+                for col_index, value in enumerate(values):
+                    item = QtWidgets.QTableWidgetItem(value)
+                    if col_index == 1:
+                        item.setData(QtCore.Qt.UserRole, sha)
+                    self.git_commit_table.setItem(row_index, col_index, item)
+                if hasattr(self, "git_reset_target_combo"):
+                    self.git_reset_target_combo.addItem(f"{short_sha}  {subject}", sha)
+        self._refresh_git_diff_view()
+
+    def _git_capture(self, args: list[str], timeout: int = 20) -> tuple[bool, str, str]:
+        if not self.current_project:
+            return False, "", "Projeto não aberto"
+        try:
+            result = subprocess.run(
+                ["git", *args],
+                cwd=str(self.current_project),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            return result.returncode == 0, (result.stdout or "").strip(), (result.stderr or "").strip()
+        except Exception as exc:
+            return False, "", str(exc)
+
+    def _docs_dir(self, create: bool = False) -> Path | None:
+        if not self.current_project:
+            return None
+        docs_dir = self.current_project / "DOCS"
+        if create:
+            docs_dir.mkdir(parents=True, exist_ok=True)
+        return docs_dir
+
+    def _doc_image_for_markdown(self, md_path: Path) -> Path | None:
+        for ext in [".png", ".ico", ".jpg", ".jpeg", ".bmp", ".gif", ".webp"]:
+            candidate = md_path.with_suffix(ext)
+            if candidate.exists():
+                return candidate
+        return None
+
+    def _parse_doc_file(self, md_path: Path) -> tuple[dict, str]:
+        raw = md_path.read_text(encoding="utf-8", errors="replace")
+        metadata = {}
+        body = raw
+        if raw.startswith("---") and "\n---" in raw[3:]:
+            try:
+                second_sep = raw.find("\n---", 3)
+                if second_sep > 0:
+                    meta_text = raw[4:second_sep]
+                    body = raw[second_sep + 4:].lstrip("\r\n")
+                    if yaml is not None:
+                        parsed = yaml.safe_load(meta_text) or {}
+                        if isinstance(parsed, dict):
+                            metadata = parsed
+            except Exception:
+                metadata = {}
+                body = raw
+        return metadata, body
+
+    def _markdown_inline_to_html(self, text: str) -> str:
+        escaped = html.escape(text)
+        escaped = re.sub(r'!\[([^\]]*)\]\(([^)]+)\)', r'<img alt="\1" src="\2" style="max-width:100%; border-radius:10px; margin:8px 0;">', escaped)
+        escaped = re.sub(r"`([^`]+)`", r"<code>\1</code>", escaped)
+        escaped = re.sub(r"\*\*([^*]+)\*\*", r"<b>\1</b>", escaped)
+        escaped = re.sub(r"\*([^*]+)\*", r"<i>\1</i>", escaped)
+        escaped = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r'<a href="\2">\1</a>', escaped)
+        return escaped
+
+    def _markdown_to_html_simple(self, markdown_text: str) -> str:
+        lines = markdown_text.replace("\r\n", "\n").split("\n")
+        html_parts = []
+        in_code = False
+        code_lang = ""
+        in_list = False
+        paragraph = []
+
+        def flush_paragraph():
+            nonlocal paragraph
+            if paragraph:
+                joined = " ".join(part.strip() for part in paragraph if part.strip())
+                if joined:
+                    html_parts.append(f"<p>{self._markdown_inline_to_html(joined)}</p>")
+                paragraph = []
+
+        for raw_line in lines:
+            line = raw_line.rstrip()
+            stripped = line.strip()
+            if stripped.startswith("```"):
+                flush_paragraph()
+                if in_list:
+                    html_parts.append("</ul>")
+                    in_list = False
+                if in_code:
+                    if code_lang == "mindmap":
+                        html_parts.append("</div>")
+                    else:
+                        html_parts.append("</pre>")
+                    in_code = False
+                    code_lang = ""
+                else:
+                    code_lang = stripped[3:].strip().lower()
+                    if code_lang == "mindmap":
+                        html_parts.append('<div class="mindmap-block">')
+                    else:
+                        html_parts.append("<pre>")
+                    in_code = True
+                continue
+            if in_code:
+                if code_lang == "mindmap":
+                    indent = len(raw_line) - len(raw_line.lstrip(" "))
+                    safe_line = self._markdown_inline_to_html(stripped)
+                    html_parts.append(
+                        f'<div class="mindmap-line" style="margin-left:{indent * 10}px;">'
+                        f'<span class="mindmap-node">{safe_line}</span></div>'
+                    )
+                else:
+                    html_parts.append(html.escape(line))
+                continue
+            if not stripped:
+                flush_paragraph()
+                if in_list:
+                    html_parts.append("</ul>")
+                    in_list = False
+                continue
+            if stripped.startswith("#"):
+                flush_paragraph()
+                if in_list:
+                    html_parts.append("</ul>")
+                    in_list = False
+                level = min(len(stripped) - len(stripped.lstrip("#")), 6)
+                html_parts.append(f"<h{level}>{self._markdown_inline_to_html(stripped[level:].strip())}</h{level}>")
+                continue
+            if stripped.startswith(("- ", "* ")):
+                flush_paragraph()
+                if not in_list:
+                    html_parts.append("<ul>")
+                    in_list = True
+                html_parts.append(f"<li>{self._markdown_inline_to_html(stripped[2:].strip())}</li>")
+                continue
+            paragraph.append(stripped)
+
+        flush_paragraph()
+        if in_list:
+            html_parts.append("</ul>")
+        if in_code:
+            html_parts.append("</div>" if code_lang == "mindmap" else "</pre>")
+        return "\n".join(html_parts)
+
+    def _mindmap_blocks_from_markdown(self, markdown_text: str) -> tuple[str, dict]:
+        placeholders = {}
+        pattern = re.compile(r"```mindmap\s*\n(.*?)```", re.DOTALL | re.IGNORECASE)
+        index = 0
+
+        def repl(match):
+            nonlocal index
+            content = match.group(1).replace("\r\n", "\n")
+            lines = []
+            for raw_line in content.split("\n"):
+                stripped = raw_line.strip()
+                if not stripped:
+                    continue
+                indent = len(raw_line) - len(raw_line.lstrip(" "))
+                lines.append(
+                    f'<div class="mindmap-line" style="margin-left:{indent * 10}px;">'
+                    f'<span class="mindmap-node">{html.escape(stripped)}</span></div>'
+                )
+            token = f"__MINDMAP_BLOCK_{index}__"
+            placeholders[token] = '<div class="mindmap-block">' + "".join(lines) + "</div>"
+            index += 1
+            return token
+
+        processed = pattern.sub(repl, markdown_text)
+        return processed, placeholders
+
+    def _render_markdown_html(self, markdown_text: str) -> str:
+        processed, placeholders = self._mindmap_blocks_from_markdown(markdown_text)
+        doc = QtGui.QTextDocument()
+        doc.setMarkdown(processed)
+        html_text = doc.toHtml()
+        for token, html_block in placeholders.items():
+            html_text = html_text.replace(html.escape(token), html_block).replace(token, html_block)
+        return (
+            "<style>body{font-family:Segoe UI,Arial,sans-serif;padding:8px;} h1,h2,h3{color:#17324d;} "
+            "pre{background:#f4f7fa;border:1px solid #d6e0ea;padding:10px;border-radius:8px;} "
+            "code{background:#eef3f7;padding:1px 4px;border-radius:4px;} li{margin:4px 0;} p{line-height:1.45;} "
+            ".mindmap-block{background:#fbfcfe;border:1px solid #d6e0ea;border-radius:12px;padding:10px;margin:12px 0;} "
+            ".mindmap-line{margin:6px 0;} .mindmap-node{display:inline-block;background:#eef6ff;border:1px solid #c7d9ee;"
+            "border-radius:999px;padding:5px 10px;font-weight:600;color:#17324d;} img{max-width:100%;}</style>"
+            + html_text
+        )
+
+    def show_docs_help_dialog(self):
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle("Ajuda da documentação")
+        self.fit_dialog_to_screen(dialog, 760, 620)
+        layout = QtWidgets.QVBoxLayout(dialog)
+        browser = QtWidgets.QTextBrowser()
+        browser.setHtml(
+            "<h2>Metadados disponíveis</h2>"
+            "<p>Use front matter YAML no topo do arquivo:</p>"
+            "<pre>---\ntitle: Documento\nupdated: 2026-08-16\nowner: Equipe\nstatus: ativo\n---</pre>"
+            "<h2>MindMap</h2>"
+            "<p>Use um bloco <code>mindmap</code>:</p>"
+            "<pre>```mindmap\nProjeto\n  Firmware\n    Lote\n    Autoversionamento\n  Docs\n    README\n```</pre>"
+            "<p>Imagens locais e links externos também são suportados no Markdown.</p>"
+        )
+        layout.addWidget(browser, 1)
+        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok)
+        buttons.accepted.connect(dialog.accept)
+        layout.addWidget(buttons)
+        dialog.exec_()
+
+    def _refresh_docs_ui(self):
+        if not hasattr(self, "docs_list"):
+            return
+        self.docs_list.clear()
+        self.docs_content.clear()
+        docs_dir = self._docs_dir(create=False)
+        buttons_enabled = bool(self.current_project)
+        for widget in [self.docs_refresh_btn, self.docs_open_folder_btn]:
+            widget.setEnabled(buttons_enabled)
+        if not docs_dir or not docs_dir.exists():
+            self.docs_content.setHtml("<b>DOCS</b><br>Abra um projeto e crie a pasta <code>DOCS</code> para usar a documentação.")
+            return
+        doc_files = sorted(docs_dir.glob("*.md"))
+        for md_path in doc_files:
+            icon_path = self._doc_image_for_markdown(md_path)
+            icon = QtGui.QIcon(self._pixmap_for_icon_path(icon_path, size=28)) if icon_path else self.style().standardIcon(QtWidgets.QStyle.SP_FileIcon)
+            item = QtWidgets.QListWidgetItem(icon, md_path.stem)
+            item.setData(QtCore.Qt.UserRole, str(md_path))
+            self.docs_list.addItem(item)
+        if doc_files:
+            self.docs_list.setCurrentRow(0)
+        else:
+            self.docs_content.setHtml("<p>Use <b>Novo MD</b> para começar.</p>")
+
+    def _show_selected_doc(self):
+        item = self.docs_list.currentItem() if hasattr(self, "docs_list") else None
+        if not item:
+            return
+        md_path = Path(item.data(QtCore.Qt.UserRole))
+        if not md_path.exists():
+            return
+        _, body = self._parse_doc_file(md_path)
+        self.docs_content.document().setBaseUrl(QtCore.QUrl.fromLocalFile(str(md_path.parent.resolve()) + os.sep))
+        self.docs_content.setHtml(self._render_markdown_html(body))
+
+    def show_project_readme(self):
+        if not self.current_project:
+            return
+        readme_path = self.current_project / "README.md"
+        if not readme_path.exists():
+            QtWidgets.QMessageBox.information(self, "README", "Este projeto não possui README.md na raiz.")
+            return
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle("README")
+        self.fit_dialog_to_screen(dialog, 900, 720)
+        layout = QtWidgets.QVBoxLayout(dialog)
+        browser = QtWidgets.QTextBrowser()
+        browser.setOpenExternalLinks(True)
+        browser.document().setBaseUrl(QtCore.QUrl.fromLocalFile(str(readme_path.parent.resolve()) + os.sep))
+        _, body = self._parse_doc_file(readme_path)
+        browser.setHtml(self._render_markdown_html(body))
+        layout.addWidget(browser, 1)
+        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok)
+        buttons.accepted.connect(dialog.accept)
+        layout.addWidget(buttons)
+        dialog.exec_()
+
+    def open_docs_editor_dialog(self):
+        if not self.current_project:
+            QtWidgets.QMessageBox.information(self, "Documentação", "Abra um projeto para editar a documentação.")
+            return
+        docs_dir = self._docs_dir(create=True)
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle("Editor da documentação")
+        self.fit_dialog_to_screen(dialog, 980, 720)
+        layout = QtWidgets.QVBoxLayout(dialog)
+        top = QtWidgets.QHBoxLayout()
+        new_btn = QtWidgets.QPushButton("Novo")
+        edit_btn = QtWidgets.QPushButton("Editar")
+        delete_btn = QtWidgets.QPushButton("Excluir")
+        icon_btn = QtWidgets.QPushButton("Ícone")
+        help_btn = QtWidgets.QPushButton("?")
+        help_btn.setFixedWidth(36)
+        refresh_btn = QtWidgets.QPushButton("Atualizar")
+        for widget in [new_btn, edit_btn, delete_btn, icon_btn, help_btn, refresh_btn]:
+            top.addWidget(widget)
+        top.addStretch(1)
+        layout.addLayout(top)
+        split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        docs_list = QtWidgets.QListWidget()
+        docs_list.setIconSize(QtCore.QSize(28, 28))
+        preview = QtWidgets.QTextBrowser()
+        preview.setOpenExternalLinks(True)
+        split.addWidget(docs_list)
+        split.addWidget(preview)
+        split.setStretchFactor(0, 2)
+        split.setStretchFactor(1, 6)
+        split.setSizes([260, 760])
+        layout.addWidget(split, 1)
+
+        def reload_docs():
+            docs_list.clear()
+            for md_path in sorted(docs_dir.glob("*.md")):
+                icon_path = self._doc_image_for_markdown(md_path)
+                icon = QtGui.QIcon(self._pixmap_for_icon_path(icon_path, size=28)) if icon_path else self.style().standardIcon(QtWidgets.QStyle.SP_FileIcon)
+                item = QtWidgets.QListWidgetItem(icon, md_path.stem)
+                item.setData(QtCore.Qt.UserRole, str(md_path))
+                docs_list.addItem(item)
+            if docs_list.count():
+                docs_list.setCurrentRow(0)
+            else:
+                preview.setHtml("<p>Nenhum documento encontrado.</p>")
+
+        def selected_doc() -> Path | None:
+            item = docs_list.currentItem()
+            return Path(item.data(QtCore.Qt.UserRole)) if item else None
+
+        def refresh_preview():
+            md_path = selected_doc()
+            if not md_path or not md_path.exists():
+                preview.setHtml("<p>Nenhum documento selecionado.</p>")
+                return
+            preview.document().setBaseUrl(QtCore.QUrl.fromLocalFile(str(md_path.parent.resolve()) + os.sep))
+            _, body = self._parse_doc_file(md_path)
+            preview.setHtml(self._render_markdown_html(body))
+
+        def create_doc():
+            self._create_doc_file()
+            reload_docs()
+            self._refresh_docs_ui()
+
+        def edit_doc():
+            md_path = selected_doc()
+            if not md_path:
+                return
+            self._edit_doc_file(md_path)
+            reload_docs()
+            self._refresh_docs_ui()
+
+        def delete_doc():
+            md_path = selected_doc()
+            if not md_path:
+                return
+            self._delete_doc_file(md_path)
+            reload_docs()
+            self._refresh_docs_ui()
+
+        def set_icon():
+            md_path = selected_doc()
+            if not md_path:
+                return
+            self._set_doc_icon(md_path)
+            reload_docs()
+            self._refresh_docs_ui()
+
+        docs_list.currentItemChanged.connect(lambda *_: refresh_preview())
+        new_btn.clicked.connect(create_doc)
+        edit_btn.clicked.connect(edit_doc)
+        delete_btn.clicked.connect(delete_doc)
+        icon_btn.clicked.connect(set_icon)
+        help_btn.clicked.connect(self.show_docs_help_dialog)
+        refresh_btn.clicked.connect(reload_docs)
+        reload_docs()
+        dialog.exec_()
+
+    def _open_docs_folder(self):
+        docs_dir = self._docs_dir(create=True)
+        if docs_dir:
+            subprocess.Popen(["explorer", str(docs_dir)])
+
+    def _doc_from_selection(self) -> Path | None:
+        item = self.docs_list.currentItem() if hasattr(self, "docs_list") else None
+        if not item:
+            return None
+        return Path(item.data(QtCore.Qt.UserRole))
+
+    def _doc_editor_dialog(self, title: str, filename_text: str = "", content_text: str = "") -> tuple[int, str, str]:
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle(title)
+        self.fit_dialog_to_screen(dialog, 860, 680)
+        layout = QtWidgets.QVBoxLayout(dialog)
+        form = QtWidgets.QFormLayout()
+        filename_edit = QtWidgets.QLineEdit(filename_text)
+        content_edit = QtWidgets.QPlainTextEdit()
+        content_edit.setPlainText(content_text)
+        form.addRow("Arquivo .md:", filename_edit)
+        layout.addLayout(form)
+        layout.addWidget(content_edit, 1)
+        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        result = dialog.exec_()
+        return result, filename_edit.text().strip(), content_edit.toPlainText()
+
+    def _create_doc_file(self):
+        docs_dir = self._docs_dir(create=True)
+        if not docs_dir:
+            return
+        result, filename, content = self._doc_editor_dialog(
+            "Novo documento",
+            "novo_documento.md",
+            "---\ntitle: Novo documento\nupdated: 2026-08-16\n---\n\n# Novo documento\n",
+        )
+        if result != 1:
+            return
+        safe_name = filename if filename.lower().endswith(".md") else f"{filename}.md"
+        safe_name = re.sub(r"[^\w\-.]+", "_", safe_name).strip("._") or "novo_documento.md"
+        (docs_dir / safe_name).write_text(content, encoding="utf-8")
+        self._refresh_docs_ui()
+
+    def _edit_doc_file(self, md_path: Path | None = None):
+        md_path = md_path or self._doc_from_selection()
+        if not md_path or not md_path.exists():
+            return
+        current_content = md_path.read_text(encoding="utf-8", errors="replace")
+        result, filename, content = self._doc_editor_dialog("Editar documento", md_path.name, current_content)
+        if result != 1:
+            return
+        safe_name = filename if filename.lower().endswith(".md") else f"{filename}.md"
+        safe_name = re.sub(r"[^\w\-.]+", "_", safe_name).strip("._") or md_path.name
+        target = md_path.with_name(safe_name)
+        if target != md_path and md_path.exists():
+            md_path.rename(target)
+            icon_path = self._doc_image_for_markdown(md_path)
+            if icon_path and icon_path.exists():
+                icon_path.rename(target.with_suffix(icon_path.suffix))
+        target.write_text(content, encoding="utf-8")
+        self._refresh_docs_ui()
+
+    def _delete_doc_file(self, md_path: Path | None = None):
+        md_path = md_path or self._doc_from_selection()
+        if not md_path or not md_path.exists():
+            return
+        answer = QtWidgets.QMessageBox.question(self, "Excluir documento", f"Deseja excluir '{md_path.name}'? Se existir ícone pareado, ele também será removido.")
+        if answer != QtWidgets.QMessageBox.Yes:
+            return
+        icon_path = self._doc_image_for_markdown(md_path)
+        md_path.unlink(missing_ok=True)
+        if icon_path:
+            icon_path.unlink(missing_ok=True)
+        self._refresh_docs_ui()
+
+    def _set_doc_icon(self, md_path: Path | None = None):
+        md_path = md_path or self._doc_from_selection()
+        if not md_path or not md_path.exists():
+            return
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Escolher ícone do documento", "", "Imagens (*.png *.jpg *.jpeg *.bmp *.ico *.gif *.webp)")
+        if not path:
+            return
+        src = Path(path)
+        dest = md_path.with_suffix(src.suffix.lower())
+        for ext in [".png", ".ico", ".jpg", ".jpeg", ".bmp", ".gif", ".webp"]:
+            candidate = md_path.with_suffix(ext)
+            if candidate.exists() and candidate != dest:
+                candidate.unlink(missing_ok=True)
+        shutil.copy2(src, dest)
+        self._refresh_docs_ui()
+
+    def _update_git_selection_details(self):
+        if not hasattr(self, "git_commit_table"):
+            return
+        row = self.git_commit_table.currentRow()
+        if row < 0:
+            self.git_selected_hash_label.setText("Hash selecionada: -")
+            self._refresh_git_diff_view()
+            return
+        item = self.git_commit_table.item(row, 1)
+        if item:
+            self.git_selected_hash_label.setText(f"Hash selecionada: {item.data(QtCore.Qt.UserRole) or item.text()}")
+        self._refresh_git_diff_view()
+
+    def _update_git_file_diff(self):
+        self._refresh_git_diff_view()
+
+    def _refresh_git_diff_view(self):
+        if not hasattr(self, "git_diff_view") or not self.current_project:
+            return
+        mode = self.git_diff_mode_combo.currentData() if hasattr(self, "git_diff_mode_combo") else "file"
+        if mode == "commit":
+            row = self.git_commit_table.currentRow() if hasattr(self, "git_commit_table") else -1
+            if row < 0:
+                self.git_diff_view.setPlainText("Selecione um commit para ver o diff.")
+                return
+            item = self.git_commit_table.item(row, 1)
+            if not item:
+                self.git_diff_view.setPlainText("Selecione um commit para ver o diff.")
+                return
+            commit_hash = str(item.data(QtCore.Qt.UserRole) or item.text())
+            _, diff_out, diff_err = self._git_capture(["show", "--stat", "--patch", "--format=medium", commit_hash], timeout=60)
+            self.git_diff_view.setPlainText(diff_out or diff_err or "Sem diff disponível.")
+            return
+
+        current_item = self.git_changed_files.currentItem() if hasattr(self, "git_changed_files") else None
+        if not current_item:
+            self.git_diff_view.setPlainText("Selecione um arquivo alterado para ver o diff.")
+            return
+        file_name = str(current_item.data(0, QtCore.Qt.UserRole) or current_item.text(0))
+        _, diff_out, diff_err = self._git_capture(["diff", "--", file_name], timeout=60)
+        if not diff_out:
+            _, diff_out, diff_err = self._git_capture(["diff", "--cached", "--", file_name], timeout=60)
+        self.git_diff_view.setPlainText(diff_out or diff_err or "Sem diff disponível para este arquivo.")
+
+    def _copy_selected_git_hash(self, short: bool = False):
+        row = self.git_commit_table.currentRow() if hasattr(self, "git_commit_table") else -1
+        if row < 0:
+            return
+        item = self.git_commit_table.item(row, 1)
+        if not item:
+            return
+        full_hash = str(item.data(QtCore.Qt.UserRole) or item.text())
+        QtWidgets.QApplication.clipboard().setText(full_hash[:7] if short else full_hash)
+
+    def _open_git_commit_context_menu(self, pos):
+        row = self.git_commit_table.currentRow() if hasattr(self, "git_commit_table") else -1
+        if row < 0:
+            return
+        menu = QtWidgets.QMenu(self)
+        copy_hash_action = menu.addAction("Copiar hash")
+        copy_short_action = menu.addAction("Copiar hash curta")
+        action = menu.exec_(self.git_commit_table.viewport().mapToGlobal(pos))
+        if action == copy_hash_action:
+            self._copy_selected_git_hash(short=False)
+        elif action == copy_short_action:
+            self._copy_selected_git_hash(short=True)
+
+    def _git_create_branch_from_selected(self):
+        branch_name, ok = QtWidgets.QInputDialog.getText(self, "Criar branch", "Nome da nova branch:")
+        if not ok or not branch_name.strip():
+            return
+        row = self.git_commit_table.currentRow() if hasattr(self, "git_commit_table") else -1
+        target = "HEAD"
+        if row >= 0:
+            item = self.git_commit_table.item(row, 1)
+            if item:
+                target = str(item.data(QtCore.Qt.UserRole) or target)
+        self._run_git_command(["branch", branch_name.strip(), target])
+
+    def _git_checkout_branch(self):
+        branch_name = self.git_branch_combo.currentText().strip() if hasattr(self, "git_branch_combo") else ""
+        if not branch_name:
+            QtWidgets.QMessageBox.information(self, "Git", "Selecione uma branch para trocar.")
+            return
+        self._run_git_command(["checkout", branch_name])
+
+    def _git_delete_branch(self):
+        target = self.git_admin_target_edit.text().strip() if hasattr(self, "git_admin_target_edit") else ""
+        if not target:
+            QtWidgets.QMessageBox.information(self, "Git", "Digite a branch local para excluir.")
+            return
+        if QtWidgets.QMessageBox.question(self, "Git Admin", f"Excluir a branch local '{target}'?") == QtWidgets.QMessageBox.Yes:
+            self._run_git_command(["branch", "-D", target])
+
+    def _git_delete_remote_branch(self):
+        target = self.git_admin_remote_target_edit.text().strip() if hasattr(self, "git_admin_remote_target_edit") else ""
+        if not target:
+            QtWidgets.QMessageBox.information(self, "Git", "Digite a branch remota para excluir.")
+            return
+        if QtWidgets.QMessageBox.question(self, "Git Admin", f"Excluir a branch remota '{target}' do origin?") == QtWidgets.QMessageBox.Yes:
+            self._run_git_command(["push", "origin", "--delete", target])
+
+    def _git_reset_hard(self):
+        target = self.git_reset_target_combo.currentData() if hasattr(self, "git_reset_target_combo") and self.git_reset_target_combo.currentIndex() >= 0 else ""
+        if not target and hasattr(self, "git_reset_target_combo"):
+            target = self.git_reset_target_combo.currentText().strip()
+        if not target:
+            QtWidgets.QMessageBox.information(self, "Git", "Digite a hash alvo para o reset --hard.")
+            return
+        if QtWidgets.QMessageBox.question(self, "Git Admin", f"Fazer git reset --hard para '{target}'?\n\nEssa ação é perigosa e descarta alterações locais.") == QtWidgets.QMessageBox.Yes:
+            self._run_git_command(["reset", "--hard", target])
 
     def _project_icon_path_from_config(self, project_path: Path, config: dict | None = None) -> Path:
         cfg = config or {}
@@ -1856,6 +3331,7 @@ class VCliQtApp(QtWidgets.QMainWindow):
         if not self.current_project or not self.current_config:
             return
         self._ensure_project_property_defaults()
+        self._sync_version_from_source()
         self.project_name_label.setText(self.current_config.get("name", self.current_project.name))
         saved_fqbn = self.current_config.get("fqbn", "")
         saved_port = self.current_config.get("port", "auto") or "auto"
@@ -1868,6 +3344,8 @@ class VCliQtApp(QtWidgets.QMainWindow):
         self.refresh_serial_status(bool(self.serial_connection))
         self._update_history_icon()
         self._update_project_actions_enabled(True)
+        self._refresh_docs_ui()
+        self._refresh_git_ui()
         if saved_fqbn:
             self.load_board_details_async(saved_fqbn)
         else:
@@ -2025,17 +3503,20 @@ class VCliQtApp(QtWidgets.QMainWindow):
             self.show_error_dialog(self.t("error.title", "Error"), str(exc))
 
     def edit_project_properties(self):
+        return self._edit_project_properties_v2()
+
+    def _edit_project_properties_v2(self):
         if not self.current_project or not self.current_config:
             return
         props = self._ensure_project_property_defaults()
         dialog = QtWidgets.QDialog(self)
         dialog.setWindowTitle(self.t("props.title", "Project Properties"))
-        self.fit_dialog_to_screen(dialog, 900, 660)
+        self.fit_dialog_to_screen(dialog, 1040, 760)
         outer = QtWidgets.QVBoxLayout(dialog)
         body = QtWidgets.QHBoxLayout()
         nav = QtWidgets.QListWidget()
         nav.setFixedWidth(220)
-        nav.addItems(["Geral", "Autoversionamento"])
+        nav.addItems(["Geral", "Autoversionamento", "Lote", "Perguntas de compilação"])
         stack = QtWidgets.QStackedWidget()
         body.addWidget(nav)
         body.addWidget(stack, 1)
@@ -2081,6 +3562,19 @@ class VCliQtApp(QtWidgets.QMainWindow):
             autoversion_mode.addItem(label, value)
         current_mode_index = autoversion_mode.findData(props.get("autoversion_mode", "disabled"))
         autoversion_mode.setCurrentIndex(current_mode_index if current_mode_index >= 0 else 0)
+        autoversion_value_mode = QtWidgets.QComboBox()
+        autoversion_value_mode.addItem("Incrementador", "increment")
+        autoversion_value_mode.addItem("Script Lua", "lua")
+        autoversion_value_mode.setCurrentIndex(max(0, autoversion_value_mode.findData(props.get("autoversion_value_mode", "increment"))))
+        autoversion_script = QtWidgets.QPlainTextEdit()
+        autoversion_script.setPlainText(props.get("autoversion_lua_script", self._default_autoversion_lua_script()) or self._default_autoversion_lua_script())
+        autoversion_script.setMinimumHeight(120)
+        autoversion_help = QtWidgets.QLabel(
+            "Incrementador: se encontrar números, incrementa o último grupo numérico.\n"
+            "Ex.: 1.2.9 -> 1.2.10, FW_A09 -> FW_A10, release -> release.1.\n"
+            "Lua: use ctx.current_value, ctx.kind, ctx.action e dados de tempo."
+        )
+        autoversion_help.setWordWrap(True)
         selected_file_label = QtWidgets.QLabel(props.get("autoversion_file", "") or "-")
         selected_file_label.setWordWrap(True)
         selected_var_label = QtWidgets.QLabel(props.get("autoversion_variable", "VERSION") or "VERSION")
@@ -2088,10 +3582,14 @@ class VCliQtApp(QtWidgets.QMainWindow):
         selected_kind_label = QtWidgets.QLabel(props.get("autoversion_kind", "string"))
         selected_kind_label.setWordWrap(True)
         auto_form.addRow(self.t("props.autoversion_mode", "Mode:"), autoversion_mode)
+        auto_form.addRow("Lógica:", autoversion_value_mode)
         auto_form.addRow(self.t("props.autoversion_file", "Selected file:"), selected_file_label)
         auto_form.addRow(self.t("props.autoversion_var", "Selected variable:"), selected_var_label)
         auto_form.addRow(self.t("props.autoversion_kind", "Detected type:"), selected_kind_label)
         auto_layout.addLayout(auto_form)
+        auto_layout.addWidget(autoversion_help)
+        auto_layout.addWidget(QtWidgets.QLabel("Script Lua:"))
+        auto_layout.addWidget(autoversion_script)
 
         files_help = QtWidgets.QLabel(self.t("props.autoversion_files", "Detected project files:"))
         vars_help = QtWidgets.QLabel(self.t("props.autoversion_vars", "Detected file variables:"))
@@ -2115,7 +3613,107 @@ class VCliQtApp(QtWidgets.QMainWindow):
         auto_layout.addLayout(files_and_vars, 1)
         stack.addWidget(auto_page)
 
+        batch_page = QtWidgets.QWidget()
+        batch_layout = QtWidgets.QFormLayout(batch_page)
+        batch_file_label = QtWidgets.QLabel(props.get("batch_file", "") or "-")
+        batch_var_edit = QtWidgets.QLineEdit(props.get("batch_variable", "LOT"))
+        batch_pattern = QtWidgets.QComboBox()
+        batch_pattern.addItem("Data + Hora", "date_time")
+        batch_pattern.addItem("Data", "date")
+        batch_pattern.addItem("Hora", "time")
+        batch_pattern.addItem("Ano + Semana + Dia", "iso_week")
+        batch_pattern.setCurrentIndex(max(0, batch_pattern.findData(props.get("batch_pattern", "date_time"))))
+        batch_preview = QtWidgets.QLabel("-")
+        batch_file_btn = QtWidgets.QPushButton("Usar arquivo do autoversionamento")
+        batch_refresh_btn = QtWidgets.QPushButton("Gerar preview")
+        batch_btn_row = QtWidgets.QHBoxLayout()
+        batch_btn_row.addWidget(batch_file_btn)
+        batch_btn_row.addWidget(batch_refresh_btn)
+        batch_btn_row.addStretch(1)
+        batch_layout.addRow("Arquivo:", batch_file_label)
+        batch_layout.addRow("Variável de lote:", batch_var_edit)
+        batch_layout.addRow("Padrão:", batch_pattern)
+        batch_layout.addRow("Preview:", batch_preview)
+        batch_layout.addRow("", self._wrap_layout(batch_btn_row))
+        stack.addWidget(batch_page)
+
+        batch_mode = QtWidgets.QComboBox()
+        batch_mode.addItem("Desativado", "disabled")
+        batch_mode.addItem("Sempre ao exportar binário", "always_export")
+        batch_mode.addItem("Sempre no upload", "always_upload")
+        batch_mode.addItem("Sempre em ambos", "always_both")
+        batch_mode.addItem("Perguntar ao exportar binário", "ask_export")
+        batch_mode.addItem("Perguntar no upload", "ask_upload")
+        batch_mode.addItem("Perguntar em ambos", "ask_both")
+        batch_mode.setCurrentIndex(max(0, batch_mode.findData(props.get("batch_mode", "disabled"))))
+        batch_file_combo = QtWidgets.QComboBox()
+        batch_file_combo.addItem("-", "")
+        batch_var_combo = QtWidgets.QComboBox()
+        batch_kind_label = QtWidgets.QLabel(props.get("batch_kind", "string"))
+        batch_value_mode = QtWidgets.QComboBox()
+        batch_value_mode.addItem("Preset de tempo", "preset")
+        batch_value_mode.addItem("Script Lua", "lua")
+        batch_value_mode.setCurrentIndex(max(0, batch_value_mode.findData(props.get("batch_value_mode", "preset"))))
+        batch_script = QtWidgets.QPlainTextEdit()
+        batch_script.setPlainText(props.get("batch_lua_script", self._default_batch_lua_script()) or self._default_batch_lua_script())
+        batch_script.setPlaceholderText("return ctx.timestamp_compact")
+        batch_script.setMinimumHeight(140)
+        batch_help = QtWidgets.QLabel(
+            "O lote pode usar um preset simples de tempo ou um script Lua. "
+            "No Lua você recebe `ctx` com data/hora, versão, projeto e ação."
+        )
+        batch_help.setWordWrap(True)
+        batch_layout.insertRow(0, "Modo:", batch_mode)
+        batch_layout.insertRow(1, "Arquivo alvo:", batch_file_combo)
+        batch_layout.insertRow(2, "Variável / macro:", batch_var_combo)
+        batch_layout.insertRow(3, "Tipo detectado:", batch_kind_label)
+        batch_layout.insertRow(4, "Algoritmo:", batch_value_mode)
+        batch_layout.insertRow(5, "Ajuda:", batch_help)
+        batch_layout.addRow("Script Lua:", batch_script)
+
+        questions_page = QtWidgets.QWidget()
+        questions_layout = QtWidgets.QHBoxLayout(questions_page)
+        question_slots_list = QtWidgets.QListWidget()
+        question_slots_list.setFixedWidth(190)
+        for slot_number in range(4):
+            question_slots_list.addItem(f"Pergunta {slot_number + 1}")
+        questions_layout.addWidget(question_slots_list)
+        question_editor = QtWidgets.QWidget()
+        question_editor_layout = QtWidgets.QVBoxLayout(question_editor)
+        question_form = QtWidgets.QFormLayout()
+        question_enabled = QtWidgets.QCheckBox("Ativar esta pergunta")
+        question_label = QtWidgets.QLineEdit()
+        question_label.setPlaceholderText("Ex.: Modelo do produto")
+        question_file_combo = QtWidgets.QComboBox()
+        question_file_combo.addItem("-", "")
+        question_var_combo = QtWidgets.QComboBox()
+        question_kind_label = QtWidgets.QLabel("string")
+        question_allow_keep = QtWidgets.QCheckBox("Permitir manter o valor atual")
+        question_allow_keep.setChecked(True)
+        question_options = QtWidgets.QPlainTextEdit()
+        question_options.setPlaceholderText("Um valor por linha, ou separado por vírgula.\nEx.: 0\n1\n2")
+        question_help = QtWidgets.QLabel(
+            "Essas perguntas aparecem antes de qualquer compilação, exportação ou upload.\n"
+            "O nome exibido é cosmético; o nome real da variável não aparece para o usuário."
+        )
+        question_help.setWordWrap(True)
+        question_form.addRow("", question_enabled)
+        question_form.addRow("Nome exibido:", question_label)
+        question_form.addRow("Arquivo:", question_file_combo)
+        question_form.addRow("Variável / macro:", question_var_combo)
+        question_form.addRow("Tipo detectado:", question_kind_label)
+        question_form.addRow("", question_allow_keep)
+        question_editor_layout.addLayout(question_form)
+        question_editor_layout.addWidget(QtWidgets.QLabel("Valores possíveis:"))
+        question_editor_layout.addWidget(question_options, 1)
+        question_editor_layout.addWidget(question_help)
+        questions_layout.addWidget(question_editor, 1)
+        stack.addWidget(questions_page)
+
         available_files = self._list_project_source_files()
+        for file_name in available_files:
+            batch_file_combo.addItem(file_name, file_name)
+            question_file_combo.addItem(file_name, file_name)
         filtered_files = {"items": list(available_files)}
         current_variables = {"items": []}
         files_list.addItems(filtered_files["items"])
@@ -2177,6 +3775,134 @@ class VCliQtApp(QtWidgets.QMainWindow):
             files_list.setCurrentRow(0)
         refresh_variables_for_selected_file()
 
+        def refresh_batch_kind():
+            data = batch_var_combo.currentData() or {}
+            batch_kind_label.setText(str(data.get("kind", "string") or "string"))
+
+        def refresh_batch_variables():
+            batch_var_combo.blockSignals(True)
+            batch_var_combo.clear()
+            current_file = str(batch_file_combo.currentData() or "").strip()
+            items = self._extract_version_variables(current_file)
+            if not items:
+                batch_var_combo.addItem("-", {"name": "", "kind": "string"})
+            for item in items:
+                batch_var_combo.addItem(f"{item['name']} [{item['kind']}]  {item['preview']}", item)
+            selected_name = str(props.get("batch_variable", "LOT") or "LOT").strip()
+            selected_index = 0
+            for idx in range(batch_var_combo.count()):
+                data = batch_var_combo.itemData(idx) or {}
+                if data.get("name") == selected_name:
+                    selected_index = idx
+                    break
+            batch_var_combo.setCurrentIndex(selected_index)
+            batch_var_combo.blockSignals(False)
+            refresh_batch_kind()
+
+        def sync_batch_visibility():
+            is_lua = (batch_value_mode.currentData() or "preset") == "lua"
+            batch_pattern.setEnabled(not is_lua)
+            batch_script.setEnabled(is_lua)
+
+        def generate_batch_preview():
+            props["batch_value_mode"] = batch_value_mode.currentData() or "preset"
+            props["batch_pattern"] = batch_pattern.currentData() or "date_time"
+            props["batch_lua_script"] = batch_script.toPlainText().strip() or self._default_batch_lua_script()
+            try:
+                value = self._generate_batch_value(action_name="export")
+                batch_preview.setText(f"Preview: {value}")
+            except Exception as exc:
+                batch_preview.setText(f"Preview com erro: {exc}")
+
+        batch_file_btn.hide()
+        batch_var_edit.hide()
+        batch_file_combo.currentIndexChanged.connect(lambda *_: (batch_file_label.setText(str(batch_file_combo.currentData() or "") or "-"), refresh_batch_variables()))
+        batch_var_combo.currentIndexChanged.connect(lambda *_: (batch_var_edit.setText(str((batch_var_combo.currentData() or {}).get("name", ""))), refresh_batch_kind()))
+        batch_refresh_btn.clicked.connect(generate_batch_preview)
+        batch_pattern.currentIndexChanged.connect(lambda *_: generate_batch_preview())
+        batch_value_mode.currentIndexChanged.connect(lambda *_: (sync_batch_visibility(), generate_batch_preview()))
+        batch_script.textChanged.connect(generate_batch_preview)
+        batch_file_combo.setCurrentIndex(max(0, batch_file_combo.findData(props.get("batch_file", ""))))
+        batch_file_label.setText(str(batch_file_combo.currentData() or "") or "-")
+        refresh_batch_variables()
+        sync_batch_visibility()
+        generate_batch_preview()
+
+        question_slots = self._normalize_compile_questions(props.get("compile_questions", []))
+        question_state = {"index": 0}
+        question_loading = {"value": False}
+
+        def update_question_kind():
+            data = question_var_combo.currentData() or {}
+            question_kind_label.setText(str(data.get("kind", "string") or "string"))
+
+        def populate_question_variables(relative_file: str, selected_name: str = ""):
+            items = self._extract_version_variables(relative_file)
+            question_var_combo.blockSignals(True)
+            question_var_combo.clear()
+            if not items:
+                question_var_combo.addItem("-", {"name": "", "kind": "string"})
+            for item in items:
+                question_var_combo.addItem(f"{item['name']} [{item['kind']}]  {item['preview']}", item)
+            selected_index = 0
+            for idx in range(question_var_combo.count()):
+                data = question_var_combo.itemData(idx) or {}
+                if data.get("name") == selected_name:
+                    selected_index = idx
+                    break
+            question_var_combo.setCurrentIndex(selected_index)
+            question_var_combo.blockSignals(False)
+            update_question_kind()
+
+        def store_question_editor():
+            if question_loading["value"]:
+                return
+            slot = question_slots[question_state["index"]]
+            slot["enabled"] = question_enabled.isChecked()
+            slot["label"] = question_label.text().strip()
+            slot["file"] = str(question_file_combo.currentData() or "").strip()
+            variable_data = question_var_combo.currentData() or {}
+            slot["variable"] = str(variable_data.get("name", "") or "").strip()
+            slot["kind"] = str(variable_data.get("kind", "string") or "string").strip()
+            slot["allow_keep"] = question_allow_keep.isChecked()
+            slot["options_text"] = question_options.toPlainText().strip()
+            question_slots_list.item(question_state["index"]).setText(slot["label"] or f"Pergunta {question_state['index'] + 1}")
+
+        def load_question_editor(index: int):
+            question_loading["value"] = True
+            slot = question_slots[index]
+            question_enabled.setChecked(slot.get("enabled", False))
+            question_label.setText(slot.get("label", ""))
+            question_allow_keep.setChecked(slot.get("allow_keep", True))
+            question_options.setPlainText(slot.get("options_text", ""))
+            file_index = max(0, question_file_combo.findData(slot.get("file", "")))
+            question_file_combo.blockSignals(True)
+            question_file_combo.setCurrentIndex(file_index)
+            question_file_combo.blockSignals(False)
+            populate_question_variables(slot.get("file", ""), slot.get("variable", ""))
+            question_kind_label.setText(slot.get("kind", "string") or "string")
+            question_loading["value"] = False
+
+        def on_question_slot_changed(index: int):
+            if index < 0:
+                return
+            if question_slots_list.count():
+                store_question_editor()
+            question_state["index"] = index
+            load_question_editor(index)
+
+        question_file_combo.currentIndexChanged.connect(
+            lambda *_: populate_question_variables(str(question_file_combo.currentData() or "").strip())
+        )
+        question_var_combo.currentIndexChanged.connect(lambda *_: update_question_kind())
+        question_label.textChanged.connect(lambda *_: store_question_editor())
+        question_enabled.toggled.connect(lambda *_: store_question_editor())
+        question_allow_keep.toggled.connect(lambda *_: store_question_editor())
+        question_options.textChanged.connect(lambda *_: store_question_editor())
+        question_slots_list.currentRowChanged.connect(on_question_slot_changed)
+        load_question_editor(0)
+        question_slots_list.setCurrentRow(0)
+
         buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
         outer.addLayout(body)
         outer.addWidget(buttons)
@@ -2203,9 +3929,31 @@ class VCliQtApp(QtWidgets.QMainWindow):
             props["contributors"] = contributors.text().strip()
             props["description"] = description.toPlainText().strip()
             props["autoversion_mode"] = autoversion_mode.currentData() or "disabled"
+            props["autoversion_value_mode"] = autoversion_value_mode.currentData() or "increment"
             props["autoversion_file"] = selected_autoversion_file["value"]
             props["autoversion_variable"] = selected_autoversion_variable["value"] or "VERSION"
             props["autoversion_kind"] = selected_kind_label.text().strip() or "string"
+            props["autoversion_lua_script"] = autoversion_script.toPlainText().strip() or self._default_autoversion_lua_script()
+            props["batch_mode"] = batch_mode.currentData() or "disabled"
+            props["batch_file"] = str(batch_file_combo.currentData() or "").strip()
+            batch_data = batch_var_combo.currentData() or {}
+            props["batch_variable"] = str(batch_data.get("name", "LOT") or "LOT").strip()
+            props["batch_kind"] = str(batch_data.get("kind", "string") or "string").strip()
+            props["batch_value_mode"] = batch_value_mode.currentData() or "preset"
+            props["batch_pattern"] = batch_pattern.currentData() or "date_time"
+            props["batch_lua_script"] = batch_script.toPlainText().strip() or self._default_batch_lua_script()
+            store_question_editor()
+            props["compile_questions"] = self._normalize_compile_questions(question_slots)
+            version_file = str(props.get("autoversion_file", "") or "").strip()
+            version_variable = str(props.get("autoversion_variable", "VERSION") or "VERSION").strip()
+            version_kind = str(props.get("autoversion_kind", "string") or "string").strip()
+            if version_file and props["version"]:
+                target_file = (self.current_project / version_file).resolve()
+                try:
+                    self._update_version_in_source_file(target_file, version_variable, props["version"], value_kind=version_kind)
+                except Exception as exc:
+                    self.show_error_dialog("Autoversionamento", f"Falha ao salvar versão manual: {exc}")
+                    return
             icon_choice = selected_icon_path["value"]
             if icon_choice == "__DEFAULT__":
                 props["icon"] = ""
@@ -2238,7 +3986,7 @@ class VCliQtApp(QtWidgets.QMainWindow):
         body = QtWidgets.QHBoxLayout()
         nav = QtWidgets.QListWidget()
         nav.setFixedWidth(220)
-        nav.addItems(["Geral", "Editor", "Bibliotecas", "Placas / JSON", "Comandos"])
+        nav.addItems(["Geral", "Editor", "Bibliotecas", "Placas / JSON", "inoCli", "Comandos"])
         stack = QtWidgets.QStackedWidget()
         body.addWidget(nav)
         body.addWidget(stack, 1)
@@ -2310,12 +4058,54 @@ class VCliQtApp(QtWidgets.QMainWindow):
         boards_layout.addLayout(boards_btns)
         stack.addWidget(boards_page)
 
+        inocli_page = QtWidgets.QWidget()
+        inocli_layout = QtWidgets.QFormLayout(inocli_page)
+        inocli_mode = QtWidgets.QComboBox()
+        inocli_mode.addItem("Usar o da pasta do V CLI", "bundled")
+        inocli_mode.addItem("Usar o pré-instalado no PATH", "path")
+        inocli_mode.addItem("Usar caminho personalizado", "custom")
+        inocli_mode.setCurrentIndex(max(0, inocli_mode.findData(settings.get("inocli_mode", "bundled"))))
+        inocli_custom_path = QtWidgets.QLineEdit(settings.get("inocli_custom_path", ""))
+        inocli_browse_btn = QtWidgets.QPushButton("...")
+        inocli_path_row = QtWidgets.QHBoxLayout()
+        inocli_path_row.addWidget(inocli_custom_path, 1)
+        inocli_path_row.addWidget(inocli_browse_btn)
+        inocli_effective_path = QtWidgets.QLabel(str(self._resolve_inocli_path()))
+        inocli_effective_path.setWordWrap(True)
+        inocli_version_label = QtWidgets.QLabel("-")
+        inocli_version_label.setWordWrap(True)
+        inocli_path_buttons = QtWidgets.QHBoxLayout()
+        inocli_register_btn = QtWidgets.QPushButton("Registrar no PATH")
+        inocli_unregister_btn = QtWidgets.QPushButton("Retirar do PATH")
+        inocli_refresh_btn = QtWidgets.QPushButton("Atualizar info")
+        for widget in [inocli_register_btn, inocli_unregister_btn, inocli_refresh_btn]:
+            inocli_path_buttons.addWidget(widget)
+        inocli_path_buttons.addStretch(1)
+        inocli_help = QtWidgets.QLabel(
+            "Padrão: usa o arduino-cli.exe da pasta onde o V CLI está rodando.\n"
+            "Você também pode usar o pré-instalado no PATH do Windows ou apontar um executável personalizado."
+        )
+        inocli_help.setWordWrap(True)
+        inocli_layout.addRow("Origem:", inocli_mode)
+        inocli_layout.addRow("Caminho personalizado:", self._wrap_layout(inocli_path_row))
+        inocli_layout.addRow("Caminho em uso:", inocli_effective_path)
+        inocli_layout.addRow("Versão:", inocli_version_label)
+        inocli_layout.addRow("", self._wrap_layout(inocli_path_buttons))
+        inocli_layout.addRow(inocli_help)
+        stack.addWidget(inocli_page)
+
         commands_page = QtWidgets.QWidget()
         commands_layout = QtWidgets.QFormLayout(commands_page)
         command_status = QtWidgets.QLabel(
             "Registrado no PATH do Windows." if self._is_vcli_registered_on_path() else "Ainda não registrado no PATH do Windows."
         )
         command_status.setWordWrap(True)
+        path_buttons = QtWidgets.QHBoxLayout()
+        register_path_btn = QtWidgets.QPushButton("Registrar")
+        unregister_path_btn = QtWidgets.QPushButton("Retirar registro")
+        path_buttons.addWidget(register_path_btn)
+        path_buttons.addWidget(unregister_path_btn)
+        path_buttons.addStretch(1)
         cmd_open = QtWidgets.QLineEdit(settings.get("command_open_template", 'vcli.cmd open "{project}"'))
         cmd_vscode = QtWidgets.QLineEdit(settings.get("command_vscode_template", 'vcli.cmd vscode "{project}"'))
         cmd_compile = QtWidgets.QLineEdit(settings.get("command_compile_template", 'vcli.cmd compile "{project}"'))
@@ -2326,6 +4116,7 @@ class VCliQtApp(QtWidgets.QMainWindow):
         )
         commands_help.setWordWrap(True)
         commands_layout.addRow("Status:", command_status)
+        commands_layout.addRow("", self._wrap_layout(path_buttons))
         commands_layout.addRow("Abrir projeto:", cmd_open)
         commands_layout.addRow("Abrir editor:", cmd_vscode)
         commands_layout.addRow("Compilar:", cmd_compile)
@@ -2372,6 +4163,8 @@ class VCliQtApp(QtWidgets.QMainWindow):
             self.app_settings["editor_command"] = editor_command.text().strip() or "code"
             self.app_settings["editor_button_color"] = editor_color.text().strip() or "#0078d4"
             self.app_settings["aux_library_repo"] = aux_repo.text().strip()
+            self.app_settings["inocli_mode"] = inocli_mode.currentData() or "bundled"
+            self.app_settings["inocli_custom_path"] = inocli_custom_path.text().strip()
             self.app_settings["command_open_template"] = cmd_open.text().strip() or 'vcli.cmd open "{project}"'
             self.app_settings["command_vscode_template"] = cmd_vscode.text().strip() or 'vcli.cmd vscode "{project}"'
             self.app_settings["command_compile_template"] = cmd_compile.text().strip() or 'vcli.cmd compile "{project}"'
@@ -2384,11 +4177,103 @@ class VCliQtApp(QtWidgets.QMainWindow):
             self.apply_app_settings_to_ui()
             dialog.accept()
 
+        def update_path_status():
+            command_status.setText(
+                "Registrado no PATH do Windows." if self._is_vcli_registered_on_path() else "Ainda não registrado no PATH do Windows."
+            )
+
+        def register_path():
+            ok_result, message = self._set_vcli_path_registration(True)
+            if not ok_result:
+                self.show_error_dialog("PATH do Windows", message)
+                return
+            update_path_status()
+
+        def unregister_path():
+            ok_result, message = self._set_vcli_path_registration(False)
+            if not ok_result:
+                self.show_error_dialog("PATH do Windows", message)
+                return
+            update_path_status()
+
+        def refresh_inocli_info():
+            if inocli_mode.currentData() == "custom":
+                self.app_settings["inocli_custom_path"] = inocli_custom_path.text().strip()
+            self.app_settings["inocli_mode"] = inocli_mode.currentData() or "bundled"
+            effective = self._resolve_inocli_path()
+            inocli_effective_path.setText(str(effective))
+            if effective.exists():
+                try:
+                    result = subprocess.run(
+                        [str(effective), "version"],
+                        capture_output=True,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                        timeout=20,
+                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                    )
+                    version_text = ((result.stdout or "") + (result.stderr or "")).strip() or "Sem saída"
+                    inocli_version_label.setText(version_text)
+                except Exception as exc:
+                    inocli_version_label.setText(str(exc))
+            else:
+                inocli_version_label.setText("Executável não encontrado.")
+            inocli_custom_path.setEnabled((inocli_mode.currentData() or "bundled") == "custom")
+            inocli_browse_btn.setEnabled((inocli_mode.currentData() or "bundled") == "custom")
+
+        def browse_inocli():
+            path, _ = QtWidgets.QFileDialog.getOpenFileName(dialog, "Escolher arduino-cli", "", "Executável (*.exe);;Todos (*.*)")
+            if not path:
+                return
+            inocli_custom_path.setText(path)
+            refresh_inocli_info()
+
+        def register_inocli_path():
+            effective = self._resolve_inocli_path()
+            if not effective.exists():
+                self.show_error_dialog("inoCli", "Executável não encontrado para registrar no PATH.")
+                return
+            cli_dir = effective.parent
+            original = Path.cwd()
+            try:
+                os.chdir(cli_dir)
+                ok_result, message = self._set_vcli_path_registration(True)
+            finally:
+                os.chdir(original)
+            if not ok_result:
+                self.show_error_dialog("inoCli", message)
+                return
+            update_path_status()
+
+        def unregister_inocli_path():
+            effective = self._resolve_inocli_path()
+            cli_dir = effective.parent
+            original = Path.cwd()
+            try:
+                os.chdir(cli_dir)
+                ok_result, message = self._set_vcli_path_registration(False)
+            finally:
+                os.chdir(original)
+            if not ok_result:
+                self.show_error_dialog("inoCli", message)
+                return
+            update_path_status()
+
         choose_color_btn.clicked.connect(choose_color)
         board_add_btn.clicked.connect(add_board_url)
         board_remove_btn.clicked.connect(remove_board_url)
+        register_path_btn.clicked.connect(register_path)
+        unregister_path_btn.clicked.connect(unregister_path)
+        inocli_mode.currentIndexChanged.connect(lambda *_: refresh_inocli_info())
+        inocli_custom_path.textChanged.connect(lambda *_: refresh_inocli_info())
+        inocli_browse_btn.clicked.connect(browse_inocli)
+        inocli_register_btn.clicked.connect(register_inocli_path)
+        inocli_unregister_btn.clicked.connect(unregister_inocli_path)
+        inocli_refresh_btn.clicked.connect(refresh_inocli_info)
         nav.currentRowChanged.connect(stack.setCurrentIndex)
         nav.setCurrentRow(0)
+        refresh_inocli_info()
         buttons.accepted.connect(save_settings)
         buttons.rejected.connect(dialog.reject)
         dialog.exec_()
@@ -2403,6 +4288,42 @@ class VCliQtApp(QtWidgets.QMainWindow):
             normalized.append(0)
         normalized[2] += 1
         return ".".join(str(value) for value in normalized[:3])
+
+    def _increment_mixed_version(self, version_text: str) -> str:
+        text = str(version_text or "").strip()
+        match = re.search(r"(\d+)(?!.*\d)", text)
+        if match:
+            digits = match.group(1)
+            bumped = str(int(digits) + 1).zfill(len(digits))
+            return f"{text[:match.start(1)]}{bumped}{text[match.end(1):]}"
+        if text:
+            return f"{text}.1"
+        return "1.0.1"
+
+    def _generate_autoversion_value(self, old_value: str, value_kind: str, action_name: str) -> str:
+        props = self._ensure_project_property_defaults()
+        mode = str(props.get("autoversion_value_mode", "increment") or "increment").strip()
+        if mode == "lua":
+            if LuaRuntime is None:
+                raise RuntimeError("Lupa/Lua não está disponível nesta instalação.")
+            current = datetime.now()
+            context = self._build_time_context(action_name=action_name, now=current)
+            context["current_value"] = str(old_value or "")
+            context["kind"] = str(value_kind or "string")
+            lua = LuaRuntime(unpack_returned_tuples=True)
+            lua.globals()["ctx"] = lua.table_from(context)
+            lua.globals()["strftime"] = lambda fmt: current.strftime(str(fmt))
+            script = str(props.get("autoversion_lua_script", "") or "").strip() or self._default_autoversion_lua_script()
+            result = lua.execute(script)
+            if result is None:
+                result = getattr(lua.globals(), "generate", lambda *_: None)(lua.table_from(context))
+            if result is None:
+                raise ValueError("O script Lua do autoversionamento não retornou valor.")
+            return str(result).strip()
+        if value_kind == "number":
+            digits = "".join(ch for ch in str(old_value or "0") if ch.isdigit())
+            return str(int(digits or "0") + 1)
+        return self._increment_mixed_version(old_value)
 
     def _update_version_in_source_file(self, target_file: Path, variable_name: str, new_version: str, value_kind: str = "string") -> bool:
         if not target_file.exists():
@@ -2469,16 +4390,20 @@ class VCliQtApp(QtWidgets.QMainWindow):
         if not self._should_run_autoversion(action_name):
             return True, ""
         props = self._ensure_project_property_defaults()
-        old_version = str(props.get("version", "1.0.0") or "1.0.0").strip()
-        new_version = self._increment_version(old_version)
-        value_kind = str(props.get("autoversion_kind", "string") or "string").strip()
-        if value_kind == "number":
-            digits = "".join(ch for ch in old_version if ch.isdigit())
-            current_number = int(digits or "0") + 1
-            new_version = str(current_number)
-        props["version"] = new_version
         version_file = str(props.get("autoversion_file", "") or "").strip()
         version_variable = str(props.get("autoversion_variable", "VERSION") or "VERSION").strip()
+        value_kind = str(props.get("autoversion_kind", "string") or "string").strip()
+        old_version = "1.0.0"
+        if version_file:
+            source_value = self._read_version_from_source_file((self.current_project / version_file).resolve(), version_variable, value_kind=value_kind)
+            old_version = str(source_value or props.get("version", "1.0.0") or "1.0.0").strip()
+        else:
+            old_version = str(props.get("version", "1.0.0") or "1.0.0").strip()
+        try:
+            new_version = self._generate_autoversion_value(old_version, value_kind, action_name)
+        except Exception as exc:
+            return False, f"Falha ao gerar a nova versão: {exc}"
+        props["version"] = new_version
         if version_file:
             target_file = (self.current_project / version_file).resolve()
             try:
@@ -2519,7 +4444,7 @@ class VCliQtApp(QtWidgets.QMainWindow):
         text_col = QtWidgets.QVBoxLayout()
         title = QtWidgets.QLabel("V CLI")
         title.setStyleSheet("font-size: 28px; font-weight: 800; color: #17324d;")
-        subtitle = QtWidgets.QLabel("Interface Qt5 para arduino-cli com serial, logs CSV e editor integrado")
+        subtitle = QtWidgets.QLabel("Compilador profissionalizado de código aberto baseado em Arduino CLI")
         subtitle.setStyleSheet("font-size: 13px; color: #4b5563;")
         text_col.addWidget(title)
         text_col.addWidget(subtitle)
@@ -2558,6 +4483,11 @@ class VCliQtApp(QtWidgets.QMainWindow):
     def compile_project(self):
         if not self.current_project or not self.current_config:
             return
+        ok_questions, question_msg = self._run_precompile_questions()
+        if not ok_questions:
+            if question_msg:
+                self.show_error_dialog("Perguntas de compilação", question_msg)
+            return
         fqbn = self.current_config.get("fqbn", "arduino:avr:uno")
         debug_lines = [
             "[PRE-DEBUG]",
@@ -2589,6 +4519,11 @@ class VCliQtApp(QtWidgets.QMainWindow):
 
     def upload_project(self):
         if not self.current_project or not self.current_config:
+            return
+        ok_questions, question_msg = self._run_precompile_questions()
+        if not ok_questions:
+            if question_msg:
+                self.show_error_dialog("Perguntas de compilação", question_msg)
             return
         ok_version, version_info = self._run_autoversion("upload")
         if not ok_version:
@@ -2647,9 +4582,18 @@ class VCliQtApp(QtWidgets.QMainWindow):
     def export_binary(self):
         if not self.current_project or not self.current_config:
             return
+        ok_questions, question_msg = self._run_precompile_questions()
+        if not ok_questions:
+            if question_msg:
+                self.show_error_dialog("Perguntas de compilação", question_msg)
+            return
         ok_version, version_info = self._run_autoversion("export")
         if not ok_version:
             self.show_error_dialog("Autoversionamento", version_info)
+            return
+        ok_batch, batch_info = self._run_batch_autofill("export")
+        if not ok_batch:
+            self.show_error_dialog("Lote", batch_info)
             return
         fqbn = self.current_config.get("fqbn", "arduino:avr:uno")
         debug_lines = [
@@ -2948,21 +4892,42 @@ class VCliQtApp(QtWidgets.QMainWindow):
 
         def worker():
             libs = self.backend.list_libraries_fixed()
+            updates = self.backend.list_library_updates()
 
             def done():
-                self.populate_installed_libraries(libs)
+                self.populate_installed_libraries(libs, updates)
 
             self.bridge.invoke.emit(done)
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def populate_installed_libraries(self, libs):
+    def populate_installed_libraries(self, libs, updates=None):
         self.loaded_libraries = libs or []
+        updates_by_name = {str(item.get("name", "")).strip().lower(): item for item in (updates or [])}
         self.libs_table.setRowCount(len(self.loaded_libraries))
         for row, lib in enumerate(self.loaded_libraries):
-            self.libs_table.setItem(row, 0, QtWidgets.QTableWidgetItem(lib.get("name", "")))
-            self.libs_table.setItem(row, 1, QtWidgets.QTableWidgetItem(lib.get("version", "")))
-            self.libs_table.setItem(row, 2, QtWidgets.QTableWidgetItem((lib.get("sentence", "") or "")[:120]))
+            name = lib.get("name", "")
+            version = lib.get("version", "")
+            desc = (lib.get("sentence", "") or "")[:120]
+            items = [
+                QtWidgets.QTableWidgetItem(name),
+                QtWidgets.QTableWidgetItem(version),
+                QtWidgets.QTableWidgetItem(desc),
+            ]
+            update_info = updates_by_name.get(str(name).strip().lower())
+            if update_info:
+                for item in items:
+                    item.setBackground(QtGui.QColor("#fff3cd"))
+                    item.setForeground(QtGui.QColor("#7a4f01"))
+                    font = item.font()
+                    font.setBold(True)
+                    item.setFont(font)
+                items[1].setText(f"{version} → {update_info.get('latest_version', '')}")
+                for item in items:
+                    item.setToolTip(f"Atualização disponível para {name}")
+            self.libs_table.setItem(row, 0, items[0])
+            self.libs_table.setItem(row, 1, items[1])
+            self.libs_table.setItem(row, 2, items[2])
 
     def install_library_zip(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Selecionar biblioteca ZIP", "", "ZIP (*.zip)")
@@ -3236,6 +5201,52 @@ class VCliQtApp(QtWidgets.QMainWindow):
             return
         dialog = CodeEditorDialog(self, self.current_project)
         dialog.exec_()
+
+    def _run_git_command(self, args: list[str]):
+        if not self.current_project:
+            QtWidgets.QMessageBox.information(self, "Git", "Abra um projeto para usar a aba Git.")
+            return
+        self.git_output.appendPlainText(f"$ git {' '.join(args)}")
+        if hasattr(self, "git_remote_history"):
+            self.git_remote_history.appendPlainText(f"$ git {' '.join(args)}")
+        try:
+            result = subprocess.run(
+                ["git", *args],
+                cwd=str(self.current_project),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=120,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            output = (result.stdout or "") + (result.stderr or "")
+            self.git_output.appendPlainText(output.strip() or "(sem saída)")
+            if hasattr(self, "git_remote_history"):
+                self.git_remote_history.appendPlainText(output.strip() or "(sem saída)")
+        except Exception as exc:
+            self.git_output.appendPlainText(str(exc))
+            if hasattr(self, "git_remote_history"):
+                self.git_remote_history.appendPlainText(str(exc))
+        self.git_output.appendPlainText("")
+        if hasattr(self, "git_remote_history"):
+            self.git_remote_history.appendPlainText("")
+        self._refresh_git_ui()
+
+    def _git_commit(self):
+        message = self.git_commit_edit.text().strip()
+        if not message:
+            QtWidgets.QMessageBox.information(self, "Git", "Digite uma mensagem de commit.")
+            return
+        self._run_git_command(["commit", "-m", message])
+
+    def _git_set_remote(self):
+        remote = self.git_remote_edit.text().strip()
+        if not remote:
+            QtWidgets.QMessageBox.information(self, "Git", "Digite a URL do remote.")
+            return
+        self._run_git_command(["remote", "remove", "origin"])
+        self._run_git_command(["remote", "add", "origin", remote])
 
     def refresh_serial_status(self, connected: bool, port: str = "", baud: str = ""):
         if connected:
