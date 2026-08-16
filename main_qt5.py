@@ -64,6 +64,12 @@ class LibraryManagerDialog(QtWidgets.QDialog):
 
     def _build_ui(self):
         layout = QtWidgets.QVBoxLayout(self)
+        intro = QtWidgets.QLabel(
+            "Pesquise no catalogo completo, filtre instaladas e enxergue rapidamente o que esta defasado."
+        )
+        intro.setWordWrap(True)
+        intro.setStyleSheet("color: #5b7288;")
+        layout.addWidget(intro)
 
         top = QtWidgets.QHBoxLayout()
         self.search_edit = QtWidgets.QLineEdit()
@@ -79,6 +85,9 @@ class LibraryManagerDialog(QtWidgets.QDialog):
         top.addWidget(self.reload_btn)
         top.addWidget(self.install_zip_btn)
         layout.addLayout(top)
+        self.summary_label = QtWidgets.QLabel("Resumo: carregando catalogo...")
+        self.summary_label.setStyleSheet("color: #355c7d; font-weight: 600;")
+        layout.addWidget(self.summary_label)
 
         splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
         layout.addWidget(splitter, 1)
@@ -96,9 +105,12 @@ class LibraryManagerDialog(QtWidgets.QDialog):
         detail_layout = QtWidgets.QVBoxLayout(detail_host)
         self.detail_title = QtWidgets.QLabel("Selecione uma biblioteca")
         self.detail_title.setObjectName("managerTitle")
+        self.detail_badge = QtWidgets.QLabel("Status: aguardando selecao")
+        self.detail_badge.setWordWrap(True)
         self.detail_installed = QtWidgets.QLabel("Instalada: -")
         self.detail_latest = QtWidgets.QLabel("Última: -")
         self.detail_author = QtWidgets.QLabel("Autor: -")
+        self.detail_category = QtWidgets.QLabel("Categoria: -")
         self.detail_desc = QtWidgets.QTextEdit()
         self.detail_desc.setReadOnly(True)
         self.detail_desc.setMinimumHeight(180)
@@ -121,7 +133,7 @@ class LibraryManagerDialog(QtWidgets.QDialog):
         self.log_box.setReadOnly(True)
         self.log_box.setMaximumHeight(180)
 
-        for widget in [self.detail_title, self.detail_installed, self.detail_latest, self.detail_author]:
+        for widget in [self.detail_title, self.detail_badge, self.detail_installed, self.detail_latest, self.detail_author, self.detail_category]:
             detail_layout.addWidget(widget)
         detail_layout.addWidget(self.detail_url)
         detail_layout.addWidget(self.detail_desc, 1)
@@ -189,19 +201,38 @@ class LibraryManagerDialog(QtWidgets.QDialog):
 
     def populate_table(self):
         self.table.setRowCount(len(self.items))
+        update_count = 0
         for row, item in enumerate(self.items):
+            has_update = bool(item.get("has_update"))
+            if has_update:
+                update_count += 1
             values = [
                 item.get("name", ""),
                 item.get("installed_version", "") or "-",
                 item.get("latest_version", "") or "-",
                 item.get("category", "") or "-",
-                str(item.get("match_score", "")),
+                "Atualizacao pendente" if has_update else ("Instalada" if item.get("installed_version") else "Catalogo"),
             ]
             for col, value in enumerate(values):
                 widget_item = QtWidgets.QTableWidgetItem(value)
-                if col == 0 and item.get("has_update"):
-                    widget_item.setForeground(QtGui.QColor("#0b6e4f"))
+                if has_update:
+                    widget_item.setBackground(QtGui.QColor("#fff3cd"))
+                    widget_item.setForeground(QtGui.QColor("#7a4f01"))
+                    font = widget_item.font()
+                    font.setBold(True)
+                    widget_item.setFont(font)
+                    widget_item.setToolTip(
+                        f"Biblioteca com update pendente: {item.get('installed_version') or '-'} -> {item.get('latest_version') or '-'}"
+                    )
+                elif item.get("installed_version"):
+                    widget_item.setToolTip("Biblioteca instalada e alinhada com o catalogo atual.")
+                else:
+                    widget_item.setToolTip("Biblioteca disponivel no catalogo, ainda nao instalada.")
                 self.table.setItem(row, col, widget_item)
+        installed_count = sum(1 for item in self.items if item.get("installed_version"))
+        self.summary_label.setText(
+            f"Resumo: {len(self.items)} bibliotecas visiveis  •  {installed_count} instaladas  •  {update_count} com update pendente"
+        )
         if self.items:
             self.table.selectRow(0)
         else:
@@ -211,9 +242,11 @@ class LibraryManagerDialog(QtWidgets.QDialog):
         item = self.selected_item()
         if not item:
             self.detail_title.setText("Selecione uma biblioteca")
+            self.detail_badge.setText("Status: aguardando selecao")
             self.detail_installed.setText("Instalada: -")
             self.detail_latest.setText("Última: -")
             self.detail_author.setText("Autor: -")
+            self.detail_category.setText("Categoria: -")
             self.detail_desc.setPlainText("")
             self.detail_url.setText("")
             self.version_combo.clear()
@@ -221,15 +254,34 @@ class LibraryManagerDialog(QtWidgets.QDialog):
             return
 
         self.detail_title.setText(item.get("name", ""))
+        self.detail_badge.setStyleSheet("")
         self.detail_installed.setText(f"Instalada: {item.get('installed_version') or '-'}")
         self.detail_latest.setText(f"Última: {item.get('latest_version') or '-'}")
         author = item.get("author") or item.get("maintainer") or "-"
         self.detail_author.setText(f"Autor: {author}")
+        self.detail_category.setText(f"Categoria: {item.get('category') or '-'}")
+        if item.get("has_update"):
+            self.detail_badge.setText(
+                f"Status: update pendente  •  {item.get('installed_version') or '-'} -> {item.get('latest_version') or '-'}"
+            )
+            self.detail_badge.setStyleSheet(
+                "padding: 6px 10px; border-radius: 10px; background: #fff3cd; color: #7a4f01; font-weight: 700;"
+            )
+        elif item.get("installed_version"):
+            self.detail_badge.setText("Status: instalada e alinhada")
+            self.detail_badge.setStyleSheet(
+                "padding: 6px 10px; border-radius: 10px; background: #e8f5ee; color: #0b6e4f; font-weight: 700;"
+            )
+        else:
+            self.detail_badge.setText("Status: disponivel para instalar")
+            self.detail_badge.setStyleSheet(
+                "padding: 6px 10px; border-radius: 10px; background: #eef4fb; color: #355c7d; font-weight: 700;"
+            )
         url = item.get("url", "")
         self.detail_url.setText(f'<a href="{url}">{url}</a>' if url else "")
         desc_parts = [item.get("sentence", ""), item.get("paragraph", "")]
         if item.get("match_reason"):
-            desc_parts.append(f"Match: {item.get('match_reason')}")
+            desc_parts.append(f"Sinal de busca: {item.get('match_reason')}")
         self.detail_desc.setPlainText("\n\n".join([x for x in desc_parts if x]))
 
         versions = item.get("versions", []) or [item.get("latest_version", "")]
@@ -256,10 +308,10 @@ class LibraryManagerDialog(QtWidgets.QDialog):
         else:
             cmp = self.app.compare_versions(selected, installed)
             if cmp > 0:
-                self.action_btn.setText(self.app.t("mgr.update", "Update"))
+                self.action_btn.setText(f"{self.app.t('mgr.update', 'Update')} para {selected}")
                 self.action_btn.setEnabled(not self.runtime_busy)
             elif cmp < 0:
-                self.action_btn.setText(self.app.t("mgr.downgrade", "Downgrade"))
+                self.action_btn.setText(f"{self.app.t('mgr.downgrade', 'Downgrade')} para {selected}")
                 self.action_btn.setEnabled(not self.runtime_busy)
             else:
                 self.action_btn.setText(self.app.t("mgr.installed_state", "Installed"))
@@ -1420,13 +1472,13 @@ class VCliQtApp(QtWidgets.QMainWindow):
         right_host = QtWidgets.QWidget()
         right_layout = QtWidgets.QVBoxLayout(right_host)
         self.git_selected_hash_label = QtWidgets.QLabel("Hash selecionada: -")
-        right_layout.addWidget(self.git_selected_hash_label)
-        self.git_diff_mode_combo = QtWidgets.QComboBox()
-        self.git_diff_mode_combo.addItem("Diff do arquivo", "file")
-        self.git_diff_mode_combo.addItem("Diff do commit", "commit")
-        right_layout.addWidget(self.git_diff_mode_combo, 0)
-        self.git_diff_view = QtWidgets.QPlainTextEdit()
-        self.git_diff_view.setReadOnly(True)
+        diff_top = QtWidgets.QHBoxLayout()
+        self.git_expand_diff_btn = QtWidgets.QPushButton("Expandir")
+        diff_top.addWidget(self.git_selected_hash_label, 1)
+        diff_top.addWidget(self.git_expand_diff_btn)
+        right_layout.addLayout(diff_top)
+        self.git_diff_view = QtWidgets.QTextBrowser()
+        self.git_diff_view.setOpenExternalLinks(False)
         right_layout.addWidget(self.git_diff_view, 1)
         main_split.addWidget(right_host)
         main_split.setStretchFactor(0, 4)
@@ -1485,17 +1537,17 @@ class VCliQtApp(QtWidgets.QMainWindow):
         admin_local_buttons.addWidget(self.git_delete_branch_btn)
         admin_local_buttons.addStretch(1)
         admin_local_layout.addLayout(admin_local_buttons)
-        self.git_admin_target_edit = QtWidgets.QLineEdit()
-        self.git_admin_target_edit.setPlaceholderText("Branch local")
-        admin_local_layout.addWidget(self.git_admin_target_edit)
+        self.git_admin_target_combo = QtWidgets.QComboBox()
+        self.git_admin_target_combo.setEditable(False)
+        admin_local_layout.addWidget(self.git_admin_target_combo)
         self.git_admin_views.addTab(admin_local_page, "Local")
 
         admin_remote_page = QtWidgets.QWidget()
         admin_remote_layout = QtWidgets.QVBoxLayout(admin_remote_page)
         self.git_delete_remote_branch_btn = QtWidgets.QPushButton("Excluir branch remota")
-        self.git_admin_remote_target_edit = QtWidgets.QLineEdit()
-        self.git_admin_remote_target_edit.setPlaceholderText("Branch remota")
-        admin_remote_layout.addWidget(self.git_admin_remote_target_edit)
+        self.git_admin_remote_target_combo = QtWidgets.QComboBox()
+        self.git_admin_remote_target_combo.setEditable(False)
+        admin_remote_layout.addWidget(self.git_admin_remote_target_combo)
         admin_remote_layout.addWidget(self.git_delete_remote_branch_btn, 0, QtCore.Qt.AlignLeft)
         self.git_admin_views.addTab(admin_remote_page, "Remote")
 
@@ -1539,7 +1591,7 @@ class VCliQtApp(QtWidgets.QMainWindow):
         self.git_changed_files.itemSelectionChanged.connect(self._update_git_file_diff)
         self.git_new_branch_btn.clicked.connect(self._git_create_branch_from_selected)
         self.git_checkout_branch_btn.clicked.connect(self._git_checkout_branch)
-        self.git_diff_mode_combo.currentIndexChanged.connect(self._refresh_git_diff_view)
+        self.git_expand_diff_btn.clicked.connect(self._open_git_diff_dialog)
         self.git_delete_branch_btn.clicked.connect(self._git_delete_branch)
         self.git_delete_remote_branch_btn.clicked.connect(self._git_delete_remote_branch)
         self.git_reset_hard_btn.clicked.connect(self._git_reset_hard)
@@ -2194,6 +2246,44 @@ class VCliQtApp(QtWidgets.QMainWindow):
             "return ctx.current_value\n"
         )
 
+    def _autoversion_strategy_label(self, mode: str) -> str:
+        labels = {
+            "increment": "Incremento simples",
+            "year_semver": "Ano + revisao incremental",
+            "iso_week": "Ano + semana ISO + revisao",
+            "lua": "Script Lua personalizado",
+        }
+        return labels.get(str(mode or "").strip(), str(mode or "increment"))
+
+    def _generate_year_semver_value(self, old_value: str, now: datetime | None = None) -> str:
+        current = now or datetime.now()
+        current_year = current.year
+        parts = [int(piece) for piece in re.findall(r"\d+", str(old_value or ""))]
+        if parts and parts[0] == current_year:
+            revision = parts[-1] + 1 if len(parts) > 1 else 1
+        else:
+            revision = 1
+        return f"{current_year}.{revision}"
+
+    def _generate_iso_week_value(self, old_value: str, now: datetime | None = None) -> str:
+        current = now or datetime.now()
+        iso_year, iso_week, _ = current.isocalendar()
+        match = re.search(r"(\d{4})[.\-_W]*(\d{1,2})[.\-_]*(\d+)$", str(old_value or ""))
+        revision = 1
+        if match:
+            old_year = int(match.group(1))
+            old_week = int(match.group(2))
+            if old_year == iso_year and old_week == iso_week:
+                revision = int(match.group(3)) + 1
+        return f"{iso_year}.W{iso_week:02d}.{revision}"
+
+    def _describe_autoversion_delta(self, old_value: str, new_value: str) -> str:
+        if not old_value:
+            return f"Novo valor inicial: {new_value}"
+        if old_value == new_value:
+            return "Sem alteracao detectada para o proximo passo."
+        return f"Proximo incremento esperado: {old_value} -> {new_value}"
+
     def _normalize_compile_questions(self, questions) -> list:
         items = list(questions or [])
         normalized = []
@@ -2329,6 +2419,13 @@ class VCliQtApp(QtWidgets.QMainWindow):
             option_values = self._split_configured_values(question.get("options_text", ""))
             if not relative_file or not variable_name or not option_values:
                 continue
+            if value_kind == "number":
+                invalid_choices = [value for value in option_values if not str(value).isdigit()]
+                if invalid_choices:
+                    return False, (
+                        f"A pergunta '{question.get('label') or f'Pergunta {index}'}' esta marcada como numerica, "
+                        f"mas possui valores invalidos: {', '.join(invalid_choices[:5])}"
+                    )
             current_value = self._read_version_from_source_file((self.current_project / relative_file).resolve(), variable_name, value_kind=value_kind)
             prompt_label = str(question.get("label", "") or "").strip() or f"Pergunta {index}"
             choices = list(option_values)
@@ -2338,10 +2435,17 @@ class VCliQtApp(QtWidgets.QMainWindow):
                 choices.insert(0, keep_label)
             elif current_value and current_value in choices:
                 default_index = choices.index(current_value)
+            prompt_text = (
+                f"{prompt_label}\n\n"
+                f"Arquivo: {relative_file}\n"
+                f"Campo: {variable_name}\n"
+                f"Tipo: {value_kind}\n"
+                f"Valor atual: {current_value or 'vazio'}"
+            )
             selected, ok = QtWidgets.QInputDialog.getItem(
                 self,
                 "Perguntas de compilação",
-                f"{prompt_label}\n\nValor atual: {current_value or 'vazio'}",
+                prompt_text,
                 choices,
                 default_index,
                 False,
@@ -2438,6 +2542,10 @@ class VCliQtApp(QtWidgets.QMainWindow):
                 for branch in branches:
                     self.git_branch_combo.addItem(branch)
             self.git_branch_combo.blockSignals(False)
+        if hasattr(self, "git_admin_target_combo"):
+            self.git_admin_target_combo.clear()
+        if hasattr(self, "git_admin_remote_target_combo"):
+            self.git_admin_remote_target_combo.clear()
 
         if hasattr(self, "git_commit_table"):
             self.git_commit_table.setRowCount(0)
@@ -2449,6 +2557,7 @@ class VCliQtApp(QtWidgets.QMainWindow):
             self.git_branch_label.setText("Branch: -")
             self.git_state_label.setText("Estado: sem repositório")
             self.git_selected_hash_label.setText("Hash selecionada: -")
+            self.git_state_label.setStyleSheet("color: #7a4f01; font-weight: 600;")
         if hasattr(self, "git_reset_target_combo"):
             self.git_reset_target_combo.clear()
         if hasattr(self, "git_sync_label"):
@@ -2484,14 +2593,30 @@ class VCliQtApp(QtWidgets.QMainWindow):
         self.git_branch_label.setText(f"Branch: {branch_name or '-'}")
         if hasattr(self, "git_branch_combo"):
             self.git_branch_combo.setCurrentIndex(max(0, self.git_branch_combo.findText(branch_name or "")))
-        self.git_state_label.setText("Estado: limpo" if not changed_lines else f"Estado: {len(changed_lines)} alteração(ões)")
+        if hasattr(self, "git_admin_target_combo"):
+            for idx in range(self.git_branch_combo.count()):
+                branch = self.git_branch_combo.itemText(idx)
+                if branch and branch != branch_name:
+                    self.git_admin_target_combo.addItem(branch)
+        repo_clean = not changed_lines
+        self.git_state_label.setText("Estado: limpo" if repo_clean else f"Estado: {len(changed_lines)} alteração(ões)")
+        self.git_state_label.setStyleSheet(
+            "color: #0b6e4f; font-weight: 700;" if repo_clean else "color: #7a4f01; font-weight: 700;"
+        )
         self.git_sync_label.setText(f"Sincronização: {sync_text}")
         self.git_sync_counts_label.setText(f"Pendências: {ahead} push / {behind} pull")
+        self.git_sync_counts_label.setStyleSheet(
+            "color: #0b6e4f; font-weight: 600;" if ahead == 0 and behind == 0 else "color: #355c7d; font-weight: 600;"
+        )
         self.git_remote_state_label.setText(f"Remote: {current_remote}")
         if hasattr(self, "git_remote_history"):
             self.git_remote_history.appendPlainText(f"Branch atual: {branch_name or '-'}")
             self.git_remote_history.appendPlainText(f"Sincronização: {sync_text}")
             self.git_remote_history.appendPlainText(f"Pendências: {ahead} push / {behind} pull")
+        if hasattr(self, "git_admin_remote_target_combo") and upstream:
+            upstream_branch = upstream.split("/", 1)[-1] if "/" in upstream else upstream
+            if upstream_branch:
+                self.git_admin_remote_target_combo.addItem(upstream_branch)
 
         if hasattr(self, "git_changed_files"):
             ok_name_status, name_status_out, _ = self._git_capture(["status", "--short"])
@@ -2503,6 +2628,10 @@ class VCliQtApp(QtWidgets.QMainWindow):
                     file_name = raw_line[3:].strip()
                     item = QtWidgets.QTreeWidgetItem([file_name, status_code])
                     item.setData(0, QtCore.Qt.UserRole, file_name)
+                    item.setToolTip(0, f"{status_code}  {file_name}")
+                    item.setToolTip(1, "Estado Git do arquivo selecionado.")
+                    if any(flag in status_code for flag in ["M", "A", "R", "D", "??"]):
+                        item.setForeground(1, QtGui.QColor("#7a4f01"))
                     self.git_changed_files.addTopLevelItem(item)
 
         if hasattr(self, "git_commit_table"):
@@ -2712,6 +2841,26 @@ class VCliQtApp(QtWidgets.QMainWindow):
             ".mindmap-line{margin:6px 0;} .mindmap-node{display:inline-block;background:#eef6ff;border:1px solid #c7d9ee;"
             "border-radius:999px;padding:5px 10px;font-weight:600;color:#17324d;} img{max-width:100%;}</style>"
             + html_text
+        )
+
+    def _render_git_diff_html(self, diff_text: str) -> str:
+        lines = []
+        for raw_line in str(diff_text or "").splitlines():
+            escaped = html.escape(raw_line)
+            style = "color:#c9d1d9;"
+            if raw_line.startswith("diff --git") or raw_line.startswith("@@"):
+                style = "color:#7ee787; font-weight:700;"
+            elif raw_line.startswith("+++ ") or raw_line.startswith("--- "):
+                style = "color:#79c0ff; font-weight:700;"
+            elif raw_line.startswith("+") and not raw_line.startswith("+++"):
+                style = "background:#123524; color:#7ee787;"
+            elif raw_line.startswith("-") and not raw_line.startswith("---"):
+                style = "background:#3b1f22; color:#ffa198;"
+            lines.append(f'<div style="{style}; white-space:pre;">{escaped}</div>')
+        return (
+            "<style>body{background:#0d1117;color:#c9d1d9;font-family:Consolas, 'Courier New', monospace;"
+            "font-size:12px;padding:8px;} div{padding:1px 6px;border-radius:4px;}</style>"
+            + "".join(lines)
         )
 
     def show_docs_help_dialog(self):
@@ -2990,43 +3139,59 @@ class VCliQtApp(QtWidgets.QMainWindow):
         row = self.git_commit_table.currentRow()
         if row < 0:
             self.git_selected_hash_label.setText("Hash selecionada: -")
+            self.git_diff_source = "file"
             self._refresh_git_diff_view()
             return
         item = self.git_commit_table.item(row, 1)
         if item:
             self.git_selected_hash_label.setText(f"Hash selecionada: {item.data(QtCore.Qt.UserRole) or item.text()}")
+        self.git_diff_source = "commit"
         self._refresh_git_diff_view()
 
     def _update_git_file_diff(self):
+        self.git_diff_source = "file"
         self._refresh_git_diff_view()
 
     def _refresh_git_diff_view(self):
         if not hasattr(self, "git_diff_view") or not self.current_project:
             return
-        mode = self.git_diff_mode_combo.currentData() if hasattr(self, "git_diff_mode_combo") else "file"
+        mode = getattr(self, "git_diff_source", "file")
         if mode == "commit":
             row = self.git_commit_table.currentRow() if hasattr(self, "git_commit_table") else -1
             if row < 0:
-                self.git_diff_view.setPlainText("Selecione um commit para ver o diff.")
+                self.git_diff_view.setHtml(self._render_git_diff_html("Selecione um commit para ver o diff."))
                 return
             item = self.git_commit_table.item(row, 1)
             if not item:
-                self.git_diff_view.setPlainText("Selecione um commit para ver o diff.")
+                self.git_diff_view.setHtml(self._render_git_diff_html("Selecione um commit para ver o diff."))
                 return
             commit_hash = str(item.data(QtCore.Qt.UserRole) or item.text())
             _, diff_out, diff_err = self._git_capture(["show", "--stat", "--patch", "--format=medium", commit_hash], timeout=60)
-            self.git_diff_view.setPlainText(diff_out or diff_err or "Sem diff disponível.")
+            self.git_diff_view.setHtml(self._render_git_diff_html(diff_out or diff_err or "Sem diff disponível."))
             return
 
         current_item = self.git_changed_files.currentItem() if hasattr(self, "git_changed_files") else None
         if not current_item:
-            self.git_diff_view.setPlainText("Selecione um arquivo alterado para ver o diff.")
+            self.git_diff_view.setHtml(self._render_git_diff_html("Selecione um arquivo alterado para ver o diff."))
             return
         file_name = str(current_item.data(0, QtCore.Qt.UserRole) or current_item.text(0))
         _, diff_out, diff_err = self._git_capture(["diff", "--", file_name], timeout=60)
         if not diff_out:
             _, diff_out, diff_err = self._git_capture(["diff", "--cached", "--", file_name], timeout=60)
-        self.git_diff_view.setPlainText(diff_out or diff_err or "Sem diff disponível para este arquivo.")
+        self.git_diff_view.setHtml(self._render_git_diff_html(diff_out or diff_err or "Sem diff disponível para este arquivo."))
+
+    def _open_git_diff_dialog(self):
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle("Diff")
+        self.fit_dialog_to_screen(dialog, 1100, 760)
+        layout = QtWidgets.QVBoxLayout(dialog)
+        browser = QtWidgets.QTextBrowser()
+        browser.setHtml(self.git_diff_view.toHtml() if hasattr(self, "git_diff_view") else "")
+        layout.addWidget(browser, 1)
+        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok)
+        buttons.accepted.connect(dialog.accept)
+        layout.addWidget(buttons)
+        dialog.exec_()
 
     def _copy_selected_git_hash(self, short: bool = False):
         row = self.git_commit_table.currentRow() if hasattr(self, "git_commit_table") else -1
@@ -3068,22 +3233,42 @@ class VCliQtApp(QtWidgets.QMainWindow):
         if not branch_name:
             QtWidgets.QMessageBox.information(self, "Git", "Selecione uma branch para trocar.")
             return
+        if QtWidgets.QMessageBox.question(
+            self,
+            "Git",
+            f"Trocar para a branch '{branch_name}'?\n\nConfirme se você já tratou alterações locais não commitadas.",
+        ) != QtWidgets.QMessageBox.Yes:
+            return
         self._run_git_command(["checkout", branch_name])
 
     def _git_delete_branch(self):
-        target = self.git_admin_target_edit.text().strip() if hasattr(self, "git_admin_target_edit") else ""
+        target = self.git_admin_target_combo.currentText().strip() if hasattr(self, "git_admin_target_combo") else ""
         if not target:
             QtWidgets.QMessageBox.information(self, "Git", "Digite a branch local para excluir.")
             return
-        if QtWidgets.QMessageBox.question(self, "Git Admin", f"Excluir a branch local '{target}'?") == QtWidgets.QMessageBox.Yes:
+        if QtWidgets.QMessageBox.question(
+            self,
+            "Git Admin",
+            (
+                f"Excluir a branch local '{target}'?\n\n"
+                "Consequência: ela some desta máquina. O histórico pode continuar existindo em commits e no remote."
+            ),
+        ) == QtWidgets.QMessageBox.Yes:
             self._run_git_command(["branch", "-D", target])
 
     def _git_delete_remote_branch(self):
-        target = self.git_admin_remote_target_edit.text().strip() if hasattr(self, "git_admin_remote_target_edit") else ""
+        target = self.git_admin_remote_target_combo.currentText().strip() if hasattr(self, "git_admin_remote_target_combo") else ""
         if not target:
             QtWidgets.QMessageBox.information(self, "Git", "Digite a branch remota para excluir.")
             return
-        if QtWidgets.QMessageBox.question(self, "Git Admin", f"Excluir a branch remota '{target}' do origin?") == QtWidgets.QMessageBox.Yes:
+        if QtWidgets.QMessageBox.question(
+            self,
+            "Git Admin",
+            (
+                f"Excluir a branch remota '{target}' do origin?\n\n"
+                "Consequência: outras pessoas deixam de ver essa branch no remote após fetch/pull."
+            ),
+        ) == QtWidgets.QMessageBox.Yes:
             self._run_git_command(["push", "origin", "--delete", target])
 
     def _git_reset_hard(self):
@@ -3093,7 +3278,14 @@ class VCliQtApp(QtWidgets.QMainWindow):
         if not target:
             QtWidgets.QMessageBox.information(self, "Git", "Digite a hash alvo para o reset --hard.")
             return
-        if QtWidgets.QMessageBox.question(self, "Git Admin", f"Fazer git reset --hard para '{target}'?\n\nEssa ação é perigosa e descarta alterações locais.") == QtWidgets.QMessageBox.Yes:
+        if QtWidgets.QMessageBox.question(
+            self,
+            "Git Admin",
+            (
+                f"Fazer git reset --hard para '{target}'?\n\n"
+                "Consequência: alterações locais não commitadas serão descartadas sem voltar sozinhas."
+            ),
+        ) == QtWidgets.QMessageBox.Yes:
             self._run_git_command(["reset", "--hard", target])
 
     def _project_icon_path_from_config(self, project_path: Path, config: dict | None = None) -> Path:
@@ -3563,7 +3755,9 @@ class VCliQtApp(QtWidgets.QMainWindow):
         current_mode_index = autoversion_mode.findData(props.get("autoversion_mode", "disabled"))
         autoversion_mode.setCurrentIndex(current_mode_index if current_mode_index >= 0 else 0)
         autoversion_value_mode = QtWidgets.QComboBox()
-        autoversion_value_mode.addItem("Incrementador", "increment")
+        autoversion_value_mode.addItem("Incremento simples", "increment")
+        autoversion_value_mode.addItem("Ano + revisão", "year_semver")
+        autoversion_value_mode.addItem("Ano + semana ISO + revisão", "iso_week")
         autoversion_value_mode.addItem("Script Lua", "lua")
         autoversion_value_mode.setCurrentIndex(max(0, autoversion_value_mode.findData(props.get("autoversion_value_mode", "increment"))))
         autoversion_script = QtWidgets.QPlainTextEdit()
@@ -3581,11 +3775,17 @@ class VCliQtApp(QtWidgets.QMainWindow):
         selected_var_label.setWordWrap(True)
         selected_kind_label = QtWidgets.QLabel(props.get("autoversion_kind", "string"))
         selected_kind_label.setWordWrap(True)
+        autoversion_preview_label = QtWidgets.QLabel("-")
+        autoversion_preview_label.setWordWrap(True)
+        autoversion_delta_label = QtWidgets.QLabel("-")
+        autoversion_delta_label.setWordWrap(True)
         auto_form.addRow(self.t("props.autoversion_mode", "Mode:"), autoversion_mode)
         auto_form.addRow("Lógica:", autoversion_value_mode)
         auto_form.addRow(self.t("props.autoversion_file", "Selected file:"), selected_file_label)
         auto_form.addRow(self.t("props.autoversion_var", "Selected variable:"), selected_var_label)
         auto_form.addRow(self.t("props.autoversion_kind", "Detected type:"), selected_kind_label)
+        auto_form.addRow("Estratégia:", autoversion_preview_label)
+        auto_form.addRow("Próximo passo:", autoversion_delta_label)
         auto_layout.addLayout(auto_form)
         auto_layout.addWidget(autoversion_help)
         auto_layout.addWidget(QtWidgets.QLabel("Script Lua:"))
@@ -3767,13 +3967,29 @@ class VCliQtApp(QtWidgets.QMainWindow):
             selected_var_label.setText(selected_autoversion_variable["value"])
             selected_kind_label.setText(data.get("kind", "string"))
 
+        def refresh_autoversion_preview():
+            props["autoversion_value_mode"] = autoversion_value_mode.currentData() or "increment"
+            props["autoversion_lua_script"] = autoversion_script.toPlainText().strip() or self._default_autoversion_lua_script()
+            current_value = version.text().strip() or props.get("version", "1.0.0") or "1.0.0"
+            kind = selected_kind_label.text().strip() or "string"
+            autoversion_preview_label.setText(self._autoversion_strategy_label(props["autoversion_value_mode"]))
+            try:
+                preview_value = self._generate_autoversion_value(current_value, kind, "preview")
+                autoversion_delta_label.setText(self._describe_autoversion_delta(current_value, preview_value))
+            except Exception as exc:
+                autoversion_delta_label.setText(f"Preview com erro: {exc}")
+
         files_list.currentItemChanged.connect(lambda *_: refresh_variables_for_selected_file())
-        vars_list.currentItemChanged.connect(lambda *_: choose_variable())
+        vars_list.currentItemChanged.connect(lambda *_: (choose_variable(), refresh_autoversion_preview()))
         file_search.textChanged.connect(lambda *_: refresh_file_list())
         var_search.textChanged.connect(lambda *_: refresh_var_list())
         if files_list.count() and files_list.currentRow() < 0:
             files_list.setCurrentRow(0)
         refresh_variables_for_selected_file()
+        autoversion_value_mode.currentIndexChanged.connect(lambda *_: refresh_autoversion_preview())
+        autoversion_script.textChanged.connect(refresh_autoversion_preview)
+        version.textChanged.connect(lambda *_: refresh_autoversion_preview())
+        refresh_autoversion_preview()
 
         def refresh_batch_kind():
             data = batch_var_combo.currentData() or {}
@@ -3983,6 +4199,12 @@ class VCliQtApp(QtWidgets.QMainWindow):
         dialog.setWindowTitle("Configurações")
         self.fit_dialog_to_screen(dialog, 980, 680)
         outer = QtWidgets.QVBoxLayout(dialog)
+        intro = QtWidgets.QLabel(
+            "Ajuste o comportamento global do V CLI. Estas opcoes afetam a experiencia inteira, nao so o projeto atual."
+        )
+        intro.setWordWrap(True)
+        intro.setStyleSheet("color: #5b7288;")
+        outer.addWidget(intro)
         body = QtWidgets.QHBoxLayout()
         nav = QtWidgets.QListWidget()
         nav.setFixedWidth(220)
@@ -4008,6 +4230,7 @@ class VCliQtApp(QtWidgets.QMainWindow):
         language_combo.setCurrentIndex(lang_index if lang_index >= 0 else 0)
         language_note = QtWidgets.QLabel("Idioma e tema são aplicados após salvar. O idioma pode exigir reiniciar a aplicação para refletir tudo.")
         language_note.setWordWrap(True)
+        general_form.addRow(QtWidgets.QLabel("Tema e idioma deixam o ambiente mais coerente para quem usa a ferramenta no dia a dia."))
         general_form.addRow("Tema:", theme_combo)
         general_form.addRow("Idioma:", language_combo)
         general_form.addRow(language_note)
@@ -4018,6 +4241,9 @@ class VCliQtApp(QtWidgets.QMainWindow):
         editor_title = QtWidgets.QLineEdit(settings.get("editor_title", "VS Code"))
         editor_command = QtWidgets.QLineEdit(settings.get("editor_command", "code"))
         editor_color = QtWidgets.QLineEdit(settings.get("editor_button_color", "#0078d4"))
+        editor_title.setPlaceholderText("Como o botao vai aparecer")
+        editor_command.setPlaceholderText("Ex.: code, cursor ou caminho completo")
+        editor_color.setPlaceholderText("#0078d4")
         choose_color_btn = QtWidgets.QPushButton("Cor...")
         color_row = QtWidgets.QHBoxLayout()
         color_row.addWidget(editor_color, 1)
@@ -4031,6 +4257,7 @@ class VCliQtApp(QtWidgets.QMainWindow):
         libs_page = QtWidgets.QWidget()
         libs_form = QtWidgets.QFormLayout(libs_page)
         aux_repo = QtWidgets.QLineEdit(settings.get("aux_library_repo", ""))
+        aux_repo.setPlaceholderText("URL opcional de um library_index.json alternativo")
         aux_info = QtWidgets.QLabel("Repositório auxiliar de bibliotecas (experimental). Use URL direta quando necessário.")
         aux_info.setWordWrap(True)
         default_lib_info = QtWidgets.QLabel("Padrão atual: índice padrão do Arduino CLI em Arduino15/library_index.json.")
@@ -4323,6 +4550,10 @@ class VCliQtApp(QtWidgets.QMainWindow):
         if value_kind == "number":
             digits = "".join(ch for ch in str(old_value or "0") if ch.isdigit())
             return str(int(digits or "0") + 1)
+        if mode == "year_semver":
+            return self._generate_year_semver_value(old_value)
+        if mode == "iso_week":
+            return self._generate_iso_week_value(old_value)
         return self._increment_mixed_version(old_value)
 
     def _update_version_in_source_file(self, target_file: Path, variable_name: str, new_version: str, value_kind: str = "string") -> bool:
@@ -4463,6 +4694,8 @@ class VCliQtApp(QtWidgets.QMainWindow):
         licenses.setOpenExternalLinks(True)
         licenses.setHtml(
             "<h3 style='color:#17324d'>Licenças e links</h3>"
+            "<p><b>Autor:</b> Valdemir DSW</p>"
+            "<p><b>Repositório oficial:</b> <a href='https://github.com/Valdemir-DSW/V-CLI'>github.com/Valdemir-DSW/V-CLI</a></p>"
             "<ul>"
             "<li><b>Python</b>: PSF License - <a href='https://www.python.org/'>python.org</a></li>"
             "<li><b>PyQt5</b>: GPL/comercial (bindings Qt for Python) - <a href='https://pypi.org/project/PyQt5/'>PyQt5</a></li>"
@@ -5366,7 +5599,10 @@ class VCliQtApp(QtWidgets.QMainWindow):
                             "rx_fps": rx_fps,
                             "line_index": self.serial_line_counter,
                         })
+                    else:
+                        time.sleep(0.02)
                 except Exception:
+                    self.log("[SERIAL] Monitor interrompido por erro na leitura ou desconexao da porta.")
                     break
 
         threading.Thread(target=worker, daemon=True).start()

@@ -1,5 +1,5 @@
 {
-  "app.title": "V CLI - VS Code Arduino plugin",
+  "app.title": "V CLI - Professional microcontroller workflow over CLI",
   "nav.new_open": "NEW/OPEN",
   "nav.history": "HISTORY",
   "hint.history": "dblclick: open\nright: remove",
