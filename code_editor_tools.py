@@ -1,4 +1,5 @@
 import re
+import shutil
 from pathlib import Path
 
 from PyQt5 import QtCore, QtGui, QtWidgets
@@ -227,7 +228,9 @@ class CodeEditorDialog(QtWidgets.QDialog):
         self.file_tree.setRootIndex(self.file_model.index(str(self.project_path)))
         for column in [1, 2, 3]:
             self.file_tree.hideColumn(column)
+        self.file_tree.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
         self.file_tree.doubleClicked.connect(self._open_from_index)
+        self.file_tree.customContextMenuRequested.connect(self._open_tree_context_menu)
         left_layout.addWidget(QtWidgets.QLabel("Arquivos"))
         left_layout.addWidget(self.file_tree, 1)
         splitter.addWidget(left)
@@ -286,6 +289,91 @@ class CodeEditorDialog(QtWidgets.QDialog):
         if path.is_dir():
             return
         self.open_file(path)
+
+    def _selected_tree_path(self) -> Path:
+        index = self.file_tree.currentIndex()
+        if index.isValid():
+            return Path(self.file_model.filePath(index))
+        return self.project_path
+
+    def _open_tree_context_menu(self, pos):
+        index = self.file_tree.indexAt(pos)
+        target = Path(self.file_model.filePath(index)) if index.isValid() else self.project_path
+        base_dir = target if target.is_dir() else target.parent
+        menu = QtWidgets.QMenu(self)
+        new_file_action = menu.addAction("Novo arquivo")
+        new_folder_action = menu.addAction("Nova pasta")
+        delete_action = menu.addAction("Excluir")
+        if target == self.project_path:
+            delete_action.setEnabled(False)
+        action = menu.exec_(self.file_tree.viewport().mapToGlobal(pos))
+        if action == new_file_action:
+            self._create_file(base_dir)
+        elif action == new_folder_action:
+            self._create_folder(base_dir)
+        elif action == delete_action:
+            self._delete_path(target)
+
+    def _create_file(self, base_dir: Path):
+        name, ok = QtWidgets.QInputDialog.getText(self, "Novo arquivo", "Nome do arquivo:")
+        if not ok or not str(name).strip():
+            return
+        safe_name = str(name).strip().replace("\\", "/").split("/")[-1]
+        target = base_dir / safe_name
+        if target.exists():
+            QtWidgets.QMessageBox.warning(self, "Code Editor", f"O arquivo '{safe_name}' já existe.")
+            return
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("", encoding="utf-8")
+            self.file_tree.setCurrentIndex(self.file_model.index(str(target)))
+            self.open_file(target)
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(self, "Code Editor", f"Falha ao criar arquivo:\n{exc}")
+
+    def _create_folder(self, base_dir: Path):
+        name, ok = QtWidgets.QInputDialog.getText(self, "Nova pasta", "Nome da pasta:")
+        if not ok or not str(name).strip():
+            return
+        safe_name = str(name).strip().replace("\\", "/").split("/")[-1]
+        target = base_dir / safe_name
+        if target.exists():
+            QtWidgets.QMessageBox.warning(self, "Code Editor", f"A pasta '{safe_name}' já existe.")
+            return
+        try:
+            target.mkdir(parents=True, exist_ok=False)
+            self.file_tree.expand(self.file_model.index(str(base_dir)))
+            self.file_tree.setCurrentIndex(self.file_model.index(str(target)))
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(self, "Code Editor", f"Falha ao criar pasta:\n{exc}")
+
+    def _delete_path(self, target: Path):
+        if target == self.project_path:
+            return
+        kind = "pasta" if target.is_dir() else "arquivo"
+        answer = QtWidgets.QMessageBox.question(
+            self,
+            "Excluir",
+            f"Deseja excluir {kind} '{target.name}'?",
+        )
+        if answer != QtWidgets.QMessageBox.Yes:
+            return
+        try:
+            if target.is_dir():
+                shutil.rmtree(target)
+            else:
+                target.unlink(missing_ok=True)
+            if self.current_file and self.current_file == target:
+                self.current_file = None
+                self.editor.blockSignals(True)
+                self.editor.setPlainText("")
+                self.editor.blockSignals(False)
+                self.file_label.setText("Nenhum arquivo aberto")
+            self.modified_files = {path for path in self.modified_files if path != target and target not in path.parents}
+            self.original_texts = {path: text for path, text in self.original_texts.items() if path != target and target not in path.parents}
+            self._refresh_modified_list()
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(self, "Code Editor", f"Falha ao excluir {kind}:\n{exc}")
 
     def open_file(self, path: Path):
         try:

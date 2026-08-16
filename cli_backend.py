@@ -24,10 +24,13 @@ NOTAS TECNICAS:
 import os
 import json
 import re
+import shutil
 import subprocess
 import threading
+import tempfile
 import time
 import zipfile
+from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional, Dict, Any
 
@@ -42,18 +45,20 @@ class CLIBackend:
             config_callback: FunÃƒÂ§ÃƒÂ£o para log/output (recebe string)
         """
         self.base_dir = Path(base_dir)
-        self.projects_dir = self.base_dir / "projects"
         self.cli_path = self.base_dir / "arduino-cli.exe"
         appdata_local = Path(os.getenv("LOCALAPPDATA") or (Path.home() / "AppData" / "Local"))
         self.arduino15_dir = appdata_local / "Arduino15"
         self.vcli_data_dir = self.arduino15_dir / "V-CLI"
         self.vcli_data_dir.mkdir(parents=True, exist_ok=True)
+        self.projects_dir = self.vcli_data_dir / "projects"
         self.config_file = self.vcli_data_dir / "cli.yaml"
         self._fallback_config_file = self.base_dir / "cli.yaml"
         self._ensure_writable_config_path()
         self.config_callback = config_callback or (lambda x: None)
         self._process_lock = threading.Lock()
         self._current_process: Optional[subprocess.Popen] = None
+        self._manual_action_running = False
+        self._manual_action_name = ""
         self._abort_requested = False
         
         # Criar diretÃƒÂ³rios necessÃƒÂ¡rios
@@ -206,8 +211,9 @@ class CLIBackend:
         with self._process_lock:
             self._abort_requested = True
             proc = self._current_process
+            manual_running = self._manual_action_running
         if not proc:
-            return False
+            return manual_running
         try:
             proc.terminate()
             return True
@@ -217,7 +223,23 @@ class CLIBackend:
     def is_action_running(self) -> bool:
         """Retorna True se um comando longo ainda estiver em execucao."""
         with self._process_lock:
-            return self._current_process is not None
+            return self._current_process is not None or self._manual_action_running
+
+    def _begin_manual_action(self, action_name: str):
+        with self._process_lock:
+            self._abort_requested = False
+            self._manual_action_running = True
+            self._manual_action_name = str(action_name or "").strip()
+
+    def _finish_manual_action(self):
+        with self._process_lock:
+            self._manual_action_running = False
+            self._manual_action_name = ""
+            self._abort_requested = False
+
+    def _should_abort_manual_action(self) -> bool:
+        with self._process_lock:
+            return bool(self._abort_requested)
 
     def _run_action_command(self, cmd: list, timeout: int = 120) -> tuple:
         """Executa comando longo com suporte a cancelamento."""
@@ -1692,29 +1714,19 @@ void loop() {
         return list(entry.get("versions", []))
 
     def list_library_updates(self) -> list:
-        installed = self.list_libraries_fixed()
-        catalog = self._library_catalog()
+        results = self.search_libraries_advanced(term="", limit=0, installed_only=True, updates_only=True)
         updates = []
-        for lib in installed:
-            name = str(lib.get("name") or "").strip()
-            current = str(lib.get("version") or "").strip()
-            if not name:
-                continue
-            meta = catalog.get(name.lower())
-            if not meta:
-                continue
-            latest = str(meta.get("latest_version") or "").strip()
-            if current and latest and self._is_newer_version(latest, current):
-                updates.append(
-                    {
-                        "name": name,
-                        "version": current,
-                        "latest_version": latest,
-                        "sentence": meta.get("sentence", ""),
-                        "url": meta.get("url", ""),
-                        "versions": meta.get("versions", []),
-                    }
-                )
+        for item in results:
+            updates.append(
+                {
+                    "name": str(item.get("name") or "").strip(),
+                    "version": str(item.get("installed_version") or "").strip(),
+                    "latest_version": str(item.get("latest_version") or "").strip(),
+                    "sentence": item.get("sentence", ""),
+                    "url": item.get("url", ""),
+                    "versions": item.get("versions", []),
+                }
+            )
         return updates
 
     def upgrade_library_sync(self, library_name: str) -> tuple:
@@ -1745,6 +1757,306 @@ void loop() {
             if candidate.exists():
                 return candidate
         return None
+
+    def _resolve_library_path_from_entry(self, lib: dict) -> Optional[Path]:
+        raw_path = str((lib or {}).get("path") or "").strip()
+        if raw_path:
+            path_obj = Path(raw_path)
+            if path_obj.exists():
+                return path_obj
+        lib_name = str((lib or {}).get("name") or "").strip()
+        if not lib_name:
+            return None
+        candidates = [
+            self.vcli_data_dir / "libraries" / lib_name,
+            self.arduino15_dir / "libraries" / lib_name,
+            Path.home() / "Documents" / "Arduino" / "libraries" / lib_name,
+        ]
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+        return None
+
+    @staticmethod
+    def _backup_safe_name(text: str) -> str:
+        cleaned = re.sub(r"[^a-zA-Z0-9._-]+", "_", str(text or "").strip())
+        return cleaned.strip("._-") or "biblioteca"
+
+    def _preferred_library_install_root(self) -> Path:
+        installed = self.list_libraries_fixed()
+        for lib in installed:
+            raw_path = str(lib.get("path") or "").strip()
+            if raw_path:
+                parent = Path(raw_path).parent
+                if parent.exists():
+                    return parent
+        candidates = [
+            Path.home() / "Documents" / "Arduino" / "libraries",
+            self.vcli_data_dir / "libraries",
+            self.arduino15_dir / "libraries",
+        ]
+        for candidate in candidates:
+            try:
+                candidate.mkdir(parents=True, exist_ok=True)
+                return candidate
+            except Exception:
+                continue
+        return candidates[0]
+
+    def _read_library_backup_manifest(self, backup_zip_path: str) -> dict:
+        backup_path = Path(backup_zip_path)
+        if not backup_path.exists():
+            raise FileNotFoundError(f"Arquivo nÃ£o encontrado: {backup_path}")
+        if backup_path.suffix.lower() != ".zip":
+            raise ValueError("O arquivo selecionado nÃ£o Ã© um ZIP")
+
+        with zipfile.ZipFile(backup_path, "r") as bundle:
+            try:
+                raw_manifest = bundle.read("manifest.json")
+            except KeyError as exc:
+                raise ValueError("Backup invÃ¡lido: manifest.json ausente") from exc
+        manifest = json.loads(raw_manifest.decode("utf-8"))
+        if not isinstance(manifest, dict):
+            raise ValueError("Backup invÃ¡lido: manifesto malformado")
+        libraries = manifest.get("libraries", [])
+        if not isinstance(libraries, list):
+            raise ValueError("Backup invÃ¡lido: lista de bibliotecas ausente")
+        return manifest
+
+    def create_libraries_backup(self, project_path: str) -> tuple:
+        project_dir = Path(project_path or "")
+        if not project_dir.exists():
+            return ("", False, "Projeto nÃ£o encontrado", "")
+        if not project_dir.is_dir():
+            return ("", False, "Caminho do projeto invÃ¡lido", "")
+
+        libraries = self.list_libraries_fixed()
+        if not libraries:
+            return ("", False, "Nenhuma biblioteca instalada para backup", "")
+        source_dirs = {}
+        for lib in libraries:
+            name = str(lib.get("name") or "").strip()
+            if not name:
+                continue
+            source_dirs[name.lower()] = self._resolve_library_path_from_entry(lib)
+
+        backup_dir = project_dir / "backup_bibliotecas"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_path = backup_dir / f"bibliotecas_backup_{stamp}.zip"
+        manifest_entries = []
+        missing = []
+        files_packed = 0
+
+        self._begin_manual_action("backup_libraries")
+        try:
+            with zipfile.ZipFile(backup_path, "w", zipfile.ZIP_DEFLATED) as bundle:
+                for lib in libraries:
+                    if self._should_abort_manual_action():
+                        try:
+                            backup_path.unlink(missing_ok=True)
+                        except Exception:
+                            pass
+                        return ("Backup cancelado antes de concluir.", False, "Operacao abortada pelo usuario", "")
+
+                    name = str(lib.get("name") or "").strip()
+                    version = str(lib.get("version") or "").strip()
+                    if not name:
+                        continue
+                    self.log(f"[LIB BACKUP] Compactando {name}...")
+                    source_dir = source_dirs.get(name.lower())
+                    if not source_dir or not source_dir.exists():
+                        missing.append(name)
+                        self.log(f"[LIB BACKUP] Caminho nÃ£o encontrado para {name}")
+                        continue
+
+                    folder_name = source_dir.name
+                    file_count = 0
+                    for item in source_dir.rglob("*"):
+                        if self._should_abort_manual_action():
+                            try:
+                                backup_path.unlink(missing_ok=True)
+                            except Exception:
+                                pass
+                            return ("Backup cancelado durante a compactaÃ§Ã£o.", False, "Operacao abortada pelo usuario", "")
+                        if not item.is_file():
+                            continue
+                        rel = item.relative_to(source_dir)
+                        bundle.write(item, arcname=str(Path("libraries") / folder_name / rel))
+                        file_count += 1
+                        files_packed += 1
+
+                    manifest_entries.append(
+                        {
+                            "name": name,
+                            "version": version,
+                            "sentence": str(lib.get("sentence") or ""),
+                            "author": str(lib.get("author") or ""),
+                            "folder_name": folder_name,
+                            "source_path": str(source_dir),
+                            "file_count": file_count,
+                        }
+                    )
+                    self.log(f"[LIB BACKUP] OK {name} ({file_count} arquivos)")
+
+                if not manifest_entries:
+                    try:
+                        backup_path.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                    missing_text = ", ".join(missing[:10]) or "nenhuma biblioteca localizada"
+                    return ("", False, f"NÃ£o foi possÃ­vel localizar bibliotecas para backup: {missing_text}", "")
+
+                manifest = {
+                    "type": "vcli_libraries_backup",
+                    "format_version": 2,
+                    "created_at": datetime.now().isoformat(timespec="seconds"),
+                    "project_name": project_dir.name,
+                    "library_count": len(manifest_entries),
+                    "files_packed": files_packed,
+                    "libraries": manifest_entries,
+                }
+                bundle.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
+
+        except Exception as exc:
+            try:
+                backup_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+            return ("", False, str(exc), "")
+        finally:
+            self._finish_manual_action()
+
+        summary = [
+            f"Backup criado: {backup_path}",
+            f"Bibliotecas empacotadas: {len(manifest_entries)}",
+            f"Arquivos compactados: {files_packed}",
+        ]
+        if missing:
+            summary.append(f"Bibliotecas nÃ£o localizadas: {len(missing)}")
+        return ("\n".join(summary), True, "", str(backup_path))
+
+    def inspect_libraries_backup(self, backup_zip_path: str) -> tuple:
+        try:
+            manifest = self._read_library_backup_manifest(backup_zip_path)
+        except Exception as exc:
+            return ({}, False, str(exc))
+
+        installed_map = {}
+        for lib in self.list_libraries_fixed():
+            name = str(lib.get("name") or "").strip()
+            version = str(lib.get("version") or "").strip()
+            if name:
+                installed_map[name.lower()] = version
+
+        libraries = []
+        conflicts = []
+        for entry in manifest.get("libraries", []):
+            if not isinstance(entry, dict):
+                continue
+            name = str(entry.get("name") or "").strip()
+            backup_version = str(entry.get("version") or "").strip()
+            installed_version = installed_map.get(name.lower(), "")
+            item = {
+                "name": name,
+                "backup_version": backup_version,
+                "installed_version": installed_version,
+                "conflict": bool(installed_version),
+            }
+            libraries.append(item)
+            if item["conflict"]:
+                conflicts.append(item)
+
+        return (
+            {
+                "project_name": manifest.get("project_name", ""),
+                "created_at": manifest.get("created_at", ""),
+                "library_count": manifest.get("library_count", len(libraries)),
+                "libraries": libraries,
+                "conflicts": conflicts,
+            },
+            True,
+            "",
+        )
+
+    def restore_libraries_backup(self, backup_zip_path: str, overwrite_existing: bool = False) -> tuple:
+        try:
+            manifest = self._read_library_backup_manifest(backup_zip_path)
+        except Exception as exc:
+            return ("", False, str(exc))
+
+        installed_map = {}
+        for lib in self.list_libraries_fixed():
+            name = str(lib.get("name") or "").strip()
+            version = str(lib.get("version") or "").strip()
+            if name:
+                installed_map[name.lower()] = version
+
+        restored = []
+        skipped = []
+        failed = []
+        self._begin_manual_action("restore_libraries")
+        try:
+            with tempfile.TemporaryDirectory(prefix="vcli_lib_restore_") as temp_dir:
+                temp_root = Path(temp_dir)
+                with zipfile.ZipFile(backup_zip_path, "r") as bundle:
+                    bundle.extractall(temp_root)
+
+                preferred_root = self._preferred_library_install_root()
+                for entry in manifest.get("libraries", []):
+                    if self._should_abort_manual_action():
+                        return ("RestauraÃ§Ã£o cancelada antes de concluir.", False, "Operacao abortada pelo usuario")
+                    if not isinstance(entry, dict):
+                        continue
+                    name = str(entry.get("name") or "").strip()
+                    backup_version = str(entry.get("version") or "").strip()
+                    folder_name = str(entry.get("folder_name") or "").strip()
+                    source_dir = temp_root / "libraries" / folder_name
+                    if not name or not folder_name or not source_dir.exists():
+                        failed.append(f"{name or folder_name}: pasta ausente no backup")
+                        continue
+
+                    installed_version = installed_map.get(name.lower(), "")
+                    if installed_version and not overwrite_existing:
+                        skipped.append(f"{name} ({installed_version} instalado, backup {backup_version or 'N/A'})")
+                        continue
+
+                    existing_path = self.find_library_path(name)
+                    target_dir = existing_path if existing_path else (preferred_root / folder_name)
+                    if target_dir.exists():
+                        if installed_version and not overwrite_existing:
+                            skipped.append(f"{name} ({installed_version} instalado, backup {backup_version or 'N/A'})")
+                            continue
+                        try:
+                            shutil.rmtree(target_dir)
+                        except Exception as exc:
+                            failed.append(f"{name}: falha ao remover pasta atual ({exc})")
+                            continue
+
+                    try:
+                        shutil.copytree(source_dir, target_dir)
+                        restored.append(f"{name} ({backup_version or 'N/A'})")
+                    except Exception as exc:
+                        failed.append(f"{name}: {exc}")
+        except Exception as exc:
+            return ("", False, str(exc))
+        finally:
+            self._finish_manual_action()
+
+        lines = [
+            f"Bibliotecas restauradas: {len(restored)}",
+            f"Bibliotecas ignoradas: {len(skipped)}",
+            f"Falhas: {len(failed)}",
+        ]
+        if restored:
+            lines.append("Restauradas: " + ", ".join(restored[:15]))
+        if skipped:
+            lines.append("Ignoradas: " + ", ".join(skipped[:15]))
+        if failed:
+            lines.append("Falhas: " + " | ".join(failed[:10]))
+        success = not failed
+        error_msg = "" if success else "Uma ou mais bibliotecas nÃ£o puderam ser restauradas"
+        return ("\n".join(lines), success, error_msg)
     
     # ==================== CÃƒâ€œDIGO ====================
     

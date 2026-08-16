@@ -1,4 +1,5 @@
 import csv
+import ctypes
 import html
 import json
 import locale
@@ -10,12 +11,17 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.parse
 import webbrowser
 from datetime import datetime
 from pathlib import Path
 
 from PyQt5 import QtCore, QtGui, QtWidgets
-
+try:
+    import PyQt5.QtWebEngineWidgets as QtWebEngineWidgets
+except ImportError:
+    QtWebEngineWidgets = None
+    print("PyQtWebEngine não está instalado")
 try:
     import winreg
 except Exception:
@@ -68,7 +74,7 @@ class LibraryManagerDialog(QtWidgets.QDialog):
             "Pesquise no catalogo completo, filtre instaladas e enxergue rapidamente o que esta defasado."
         )
         intro.setWordWrap(True)
-        intro.setStyleSheet("color: #5b7288;")
+        self.app._mark_muted_label(intro)
         layout.addWidget(intro)
 
         top = QtWidgets.QHBoxLayout()
@@ -86,7 +92,7 @@ class LibraryManagerDialog(QtWidgets.QDialog):
         top.addWidget(self.install_zip_btn)
         layout.addLayout(top)
         self.summary_label = QtWidgets.QLabel("Resumo: carregando catalogo...")
-        self.summary_label.setStyleSheet("color: #355c7d; font-weight: 600;")
+        self.summary_label.setStyleSheet("font-weight: 600;")
         layout.addWidget(self.summary_label)
 
         splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
@@ -801,7 +807,7 @@ class ActionProgressDialog(QtWidgets.QDialog):
         self.abort_btn.setObjectName("warningOrange")
         self.abort_btn.setEnabled(abort_callback is not None)
         close_hint = QtWidgets.QLabel("Fechamento bloqueado até a operação terminar ou ser abortada.")
-        close_hint.setStyleSheet("color: #6b7280;")
+        close_hint.setObjectName("mutedLabel")
         layout.addWidget(title_label)
         layout.addWidget(self.subtitle_label)
         layout.addWidget(self.progress)
@@ -873,15 +879,70 @@ class ActionResultDialog(QtWidgets.QDialog):
         layout.addWidget(buttons)
 
 
+class WebBrowserQt(QtWidgets.QDialog):
+    def __init__(self, parent, title: str = "Pesquisar"):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        if hasattr(parent, "fit_dialog_to_screen"):
+            parent.fit_dialog_to_screen(self, 1180, 760)
+        else:
+            self.resize(1180, 760)
+        layout = QtWidgets.QVBoxLayout(self)
+        self.url_label = QtWidgets.QLineEdit()
+        self.url_label.setReadOnly(True)
+        layout.addWidget(self.url_label)
+
+        self.browser = QtWebEngineWidgets.QWebEngineView(self) if QtWebEngineWidgets is not None else None
+        if self.browser is not None:
+            layout.addWidget(self.browser, 1)
+        else:
+            fallback = QtWidgets.QTextBrowser()
+            fallback.setOpenExternalLinks(True)
+            fallback.setHtml(
+                "<h3>Navegador interno indisponível</h3>"
+                "<p>QtWebEngine não está disponível nesta instalação.</p>"
+                "<p>Use o botão abaixo para abrir a pesquisa no navegador padrão.</p>"
+            )
+            self.browser = fallback
+            layout.addWidget(fallback, 1)
+
+        buttons_row = QtWidgets.QHBoxLayout()
+        self.open_external_btn = QtWidgets.QPushButton("Abrir no navegador")
+        close_btn = QtWidgets.QPushButton("Fechar")
+        buttons_row.addStretch(1)
+        buttons_row.addWidget(self.open_external_btn)
+        buttons_row.addWidget(close_btn)
+        layout.addLayout(buttons_row)
+        close_btn.clicked.connect(self.accept)
+        self.open_external_btn.clicked.connect(self._open_external)
+        self._current_url = ""
+
+    def load_url(self, url: str):
+        self._current_url = str(url or "").strip()
+        self.url_label.setText(self._current_url)
+        if hasattr(self.browser, "load"):
+            self.browser.load(QtCore.QUrl(self._current_url))
+        elif isinstance(self.browser, QtWidgets.QTextBrowser):
+            safe_url = html.escape(self._current_url)
+            self.browser.setHtml(
+                f"<h3>Pesquisa pronta</h3><p><a href=\"{safe_url}\">{safe_url}</a></p>"
+            )
+
+    def _open_external(self):
+        if self._current_url:
+            webbrowser.open(self._current_url)
+
+
 class VCliQtApp(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
+        self.app_base_dir = Path(__file__).resolve().parent
         appdata_local = Path(os.getenv("LOCALAPPDATA") or (Path.home() / "AppData" / "Local"))
         self.appdata_dir = appdata_local / "Arduino15" / "V-CLI"
         self.appdata_dir.mkdir(parents=True, exist_ok=True)
         self.app_settings_file = self.appdata_dir / "settings.json"
         self.app_settings = self._load_app_settings()
-        self.locale_dir = Path.cwd() / "locales"
+        self.locale_dir = self.app_base_dir / "locales"
         self.translations = {}
         self.lang = "en"
         self._load_i18n()
@@ -909,7 +970,7 @@ class VCliQtApp(QtWidgets.QMainWindow):
         self.available_ports = []
         self.baud_options = ["9600", "19200", "38400", "57600", "115200"]
         self.recent_projects_file = self.appdata_dir / "recent_projects.json"
-        self.app_icon_path = Path.cwd() / ".ico"
+        self.app_icon_path = self.app_base_dir / ".ico"
         self.recent_projects = []
         self._load_recent_projects()
         self.boards_cache = []
@@ -918,23 +979,31 @@ class VCliQtApp(QtWidgets.QMainWindow):
         self.variant_options = []
         self.dynamic_tool_controls = {}
         self.startup_dialog = None
-        self.default_project_icon_path = Path.cwd() / "project_padrao.png"
+        self.default_project_icon_path = self.app_base_dir / "project_padrao.png"
         self.board_updates_count = 0
         self.board_updates_flash_on = False
         self.board_updates_timer = QtCore.QTimer(self)
         self.board_updates_timer.setInterval(650)
         self.board_updates_timer.timeout.connect(self._toggle_board_updates_flash)
+        self.libs_updates_count = 0
+        self.libs_updates_flash_on = False
+        self.libs_updates_timer = QtCore.QTimer(self)
+        self.libs_updates_timer.setInterval(650)
+        self.libs_updates_timer.timeout.connect(self._toggle_libs_updates_flash)
 
         self.setWindowTitle(self.t("app.title", "V CLI - VS Code Arduino plugin"))
-        self.resize(1280, 820)
         self.setMinimumSize(1000, 680)
         if self.app_icon_path.exists():
             self.setWindowIcon(QtGui.QIcon(str(self.app_icon_path)))
         self._apply_styles()
         self._build_ui()
+        self.tray_icon = None
+        self._quitting_from_tray = False
+        self._create_tray_icon()
 
         self.backend = CLIBackend(os.getcwd(), self.bridge.log_message.emit)
         self.load_recent_projects_widget()
+        self.apply_app_settings_to_ui()
         QtCore.QTimer.singleShot(0, self.start_initial_loading)
 
     def _load_i18n(self):
@@ -977,29 +1046,71 @@ class VCliQtApp(QtWidgets.QMainWindow):
         if theme == "dark":
             self.setStyleSheet(
                 """
-                QMainWindow, QDialog { background: #101418; color: #e5edf5; }
+                QMainWindow, QDialog, QWidget { background: #101418; color: #e5edf5; }
+                QMenuBar { background: #f3f4f6; color: #111827; border-bottom: 1px solid #d1d5db; }
+                QMenuBar::item { background: transparent; color: #111827; padding: 4px 8px; }
+                QMenuBar::item:selected { background: #dbeafe; color: #0f172a; border-radius: 4px; }
+                QMenuBar::item:pressed { background: #bfdbfe; color: #0f172a; border-radius: 4px; }
                 QFrame#sidePanel { background: #16202a; border: 1px solid #293544; border-radius: 12px; }
                 QListWidget#recentProjects { font-size: 13px; padding: 4px; }
                 QListWidget#recentProjects::item { min-height: 28px; border-radius: 6px; padding: 4px 8px; }
                 QListWidget#recentProjects::item:selected { background: #28435c; color: white; }
                 QLabel#historyBanner { font-size: 14px; font-weight: 800; color: #f0f6fb; padding: 4px 8px; background: rgba(255,255,255,0.06); border: 1px solid #32465a; border-radius: 10px; }
                 QLabel#boardUpdatesLabel { font-size: 12px; font-weight: 700; color: #9aa8b6; padding: 4px 8px; }
+                QLabel#mutedLabel { color: #9fb4c7; background: transparent; }
                 QLabel#sectionTitle, QLabel#managerTitle { font-size: 15px; font-weight: 700; color: #f0f6fb; }
                 QPushButton { background: #1a2530; color: #e5edf5; border: 1px solid #334355; border-radius: 8px; padding: 7px 12px; font-weight: 600; }
                 QPushButton:hover { border-color: #6b8ba7; }
                 QTabWidget::pane, QGroupBox { border: 1px solid #293544; border-radius: 10px; background: #141b23; }
+                QGroupBox::title { color: #d8e7f5; subcontrol-origin: margin; left: 12px; padding: 0 4px; }
                 QTabBar::tab { background: #1e2a36; border: 1px solid #293544; padding: 8px 14px; border-top-left-radius: 8px; border-top-right-radius: 8px; margin-right: 2px; color: #e5edf5; }
                 QTabBar::tab:selected { background: #141b23; }
                 QPlainTextEdit#consoleBox, QPlainTextEdit#serialBox, QPlainTextEdit#cliBox { background: #050607; color: #00ff7f; border: 1px solid #111; border-radius: 10px; font-family: Consolas, Courier New, monospace; font-size: 12px; }
-                QLineEdit, QComboBox, QListWidget, QTableWidget, QTextEdit, QPlainTextEdit { border: 1px solid #334355; border-radius: 8px; padding: 6px; background: #0f151c; color: #e5edf5; }
+                QLineEdit, QComboBox, QListWidget, QTableWidget, QTextEdit, QPlainTextEdit, QTextBrowser, QTreeWidget { border: 1px solid #334355; border-radius: 8px; padding: 6px; background: #0f151c; color: #e5edf5; }
+                QComboBox::drop-down { border: none; background: #1a2530; width: 24px; border-top-right-radius: 8px; border-bottom-right-radius: 8px; }
+                QComboBox QAbstractItemView, QListView, QAbstractItemView { background: #16202a; color: #e5edf5; selection-background-color: #28435c; selection-color: white; border: 1px solid #334355; }
+                QCheckBox, QRadioButton { color: #e5edf5; background: transparent; }
+                QDialogButtonBox { background: transparent; }
+                QHeaderView::section { background: #1e2a36; color: #e5edf5; border: 1px solid #334355; padding: 6px; }
+                QMenu { background: #16202a; color: #e5edf5; border: 1px solid #334355; }
+                QMenu::item:selected { background: #28435c; color: white; }
+                QSplitter::handle { background: #293544; }
+                QScrollBar:vertical, QScrollBar:horizontal { background: #141b23; border: none; }
+                QScrollBar:vertical { width: 14px; margin: 2px; }
+                QScrollBar:horizontal { height: 14px; margin: 2px; }
+                QScrollBar::handle:vertical, QScrollBar::handle:horizontal { background: #42576c; border-radius: 7px; min-height: 28px; min-width: 28px; }
+                QScrollBar::handle:vertical:hover, QScrollBar::handle:horizontal:hover { background: #5f7a95; }
+                QScrollBar::add-line, QScrollBar::sub-line, QScrollBar::add-page, QScrollBar::sub-page { background: transparent; border: none; }
+                QTableCornerButton::section { background: #1e2a36; border: 1px solid #334355; }
                 """
             )
+            self._apply_theme_accents(dark=True)
             return
         self.setStyleSheet(
             """
-            QMainWindow, QDialog {
+            QMainWindow, QDialog, QWidget {
                 background: #f4f6f8;
                 color: #1e2933;
+            }
+            QMenuBar {
+                background: #ffffff;
+                color: #1e2933;
+                border-bottom: 1px solid #c8d3df;
+            }
+            QMenuBar::item {
+                background: transparent;
+                color: #1e2933;
+                padding: 4px 8px;
+            }
+            QMenuBar::item:selected {
+                background: #cfe5ff;
+                color: #12344d;
+                border-radius: 4px;
+            }
+            QMenuBar::item:pressed {
+                background: #b9d8ff;
+                color: #12344d;
+                border-radius: 4px;
             }
             QFrame#sidePanel {
                 background: qlineargradient(x1:0,y1:0,x2:0,y2:1,stop:0 #eef3f7, stop:1 #dfe7ef);
@@ -1039,6 +1150,10 @@ class VCliQtApp(QtWidgets.QMainWindow):
                 color: #6b7280;
                 padding: 4px 8px;
             }
+            QLabel#mutedLabel {
+                color: #5b7288;
+                background: transparent;
+            }
             QPushButton {
                 background: #ffffff;
                 border: 1px solid #c6d0da;
@@ -1059,6 +1174,12 @@ class VCliQtApp(QtWidgets.QMainWindow):
                 border-radius: 10px;
                 background: white;
             }
+            QGroupBox::title {
+                color: #12344d;
+                subcontrol-origin: margin;
+                left: 12px;
+                padding: 0 4px;
+            }
             QTabBar::tab {
                 background: #dde7f0;
                 border: 1px solid #c8d3df;
@@ -1078,14 +1199,72 @@ class VCliQtApp(QtWidgets.QMainWindow):
                 font-family: Consolas, Courier New, monospace;
                 font-size: 12px;
             }
-            QLineEdit, QComboBox, QListWidget, QTableWidget, QTextEdit {
+            QLineEdit, QComboBox, QListWidget, QTableWidget, QTextEdit, QPlainTextEdit, QTextBrowser, QTreeWidget {
                 border: 1px solid #c6d0da;
                 border-radius: 8px;
                 padding: 6px;
                 background: white;
+                color: #1e2933;
             }
+            QComboBox::drop-down {
+                border: none;
+                background: #eef3f7;
+                width: 24px;
+                border-top-right-radius: 8px;
+                border-bottom-right-radius: 8px;
+            }
+            QComboBox QAbstractItemView, QListView, QAbstractItemView {
+                background: white;
+                color: #1e2933;
+                selection-background-color: #cfe5ff;
+                selection-color: #12344d;
+                border: 1px solid #c8d3df;
+            }
+            QCheckBox, QRadioButton { color: #1e2933; background: transparent; }
+            QDialogButtonBox { background: transparent; }
+            QHeaderView::section { background: #eef3f7; color: #12344d; border: 1px solid #c8d3df; padding: 6px; }
+            QMenu { background: white; color: #1e2933; border: 1px solid #c8d3df; }
+            QMenu::item:selected { background: #cfe5ff; color: #12344d; }
+            QSplitter::handle { background: #d8e1ea; }
+            QScrollBar:vertical, QScrollBar:horizontal { background: #eef3f7; border: none; }
+            QScrollBar:vertical { width: 14px; margin: 2px; }
+            QScrollBar:horizontal { height: 14px; margin: 2px; }
+            QScrollBar::handle:vertical, QScrollBar::handle:horizontal { background: #b7c7d8; border-radius: 7px; min-height: 28px; min-width: 28px; }
+            QScrollBar::handle:vertical:hover, QScrollBar::handle:horizontal:hover { background: #90a8c1; }
+            QScrollBar::add-line, QScrollBar::sub-line, QScrollBar::add-page, QScrollBar::sub-page { background: transparent; border: none; }
+            QTableCornerButton::section { background: #eef3f7; border: 1px solid #c8d3df; }
             """
         )
+        self._apply_theme_accents(dark=False)
+
+    def _apply_theme_accents(self, dark: bool):
+        title_color = "#c7d7e7" if dark else "#2f4858"
+        summary_style = (
+            "padding: 8px 10px; border: 1px solid #334355; border-radius: 10px; background: rgba(64,114,158,0.16); color: #d8e7f5;"
+            if dark
+            else "padding: 8px 10px; border: 1px solid #c6d0da; border-radius: 10px; background: rgba(40,120,180,0.06); color: #1e2933;"
+        )
+        if hasattr(self, "dynamic_title_label"):
+            self.dynamic_title_label.setStyleSheet(f"font-style: italic; color: {title_color};")
+        if hasattr(self, "serial_csv_summary"):
+            self.serial_csv_summary.setStyleSheet(summary_style)
+        if hasattr(self, "libs_updates_label"):
+            self._refresh_libs_updates_indicator()
+        self._apply_windows_titlebar_theme(dark)
+
+    def _mark_muted_label(self, widget):
+        if widget is not None:
+            widget.setObjectName("mutedLabel")
+
+    def _apply_windows_titlebar_theme(self, dark: bool):
+        if sys.platform != "win32":
+            return
+        try:
+            hwnd = int(self.winId())
+            value = ctypes.c_int(1 if dark else 0)
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 20, ctypes.byref(value), ctypes.sizeof(value))
+        except Exception:
+            pass
 
     def _build_ui(self):
         root = QtWidgets.QWidget()
@@ -1153,7 +1332,7 @@ class VCliQtApp(QtWidgets.QMainWindow):
         self.recent_list.itemDoubleClicked.connect(lambda *_: self.open_recent_project())
         self.recent_list.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
         self.recent_list.customContextMenuRequested.connect(self.open_recent_context_menu)
-        self.tabs.currentChanged.connect(lambda *_: self._refresh_board_updates_indicator())
+        self.tabs.currentChanged.connect(lambda *_: (self._refresh_board_updates_indicator(), self._refresh_libs_updates_indicator()))
         self._update_project_actions_enabled(False)
         self.apply_app_settings_to_ui()
         self._refresh_docs_ui()
@@ -1185,6 +1364,8 @@ class VCliQtApp(QtWidgets.QMainWindow):
         tools_menu = menu_bar.addMenu("Ferramentas")
         settings_action = QtWidgets.QAction("Configurações", self)
         about_action = QtWidgets.QAction("About", self)
+        self.action_lib_backup = QtWidgets.QAction("Backup de bibliotecas", self)
+        self.action_lib_restore = QtWidgets.QAction("Restaurar backup de bibliotecas", self)
         self.action_open_csv_log = QtWidgets.QAction("Lista de logs do projeto", self)
         self.action_open_external_log = QtWidgets.QAction("Abrir log externo", self)
         self.action_code_editor = QtWidgets.QAction("Code Editor", self)
@@ -1197,6 +1378,9 @@ class VCliQtApp(QtWidgets.QMainWindow):
         tools_menu.addAction(self.action_open_external_log)
         tools_menu.addAction(self.action_code_editor)
         tools_menu.addAction(self.action_docs_editor)
+        tools_menu.addSeparator()
+        tools_menu.addAction(self.action_lib_backup)
+        tools_menu.addAction(self.action_lib_restore)
         vcli_menu.addAction(settings_action)
         vcli_menu.addAction(about_action)
         vcli_menu.addSeparator()
@@ -1217,6 +1401,8 @@ class VCliQtApp(QtWidgets.QMainWindow):
         self.action_open_external_log.triggered.connect(self.open_external_csv_log_viewer)
         self.action_code_editor.triggered.connect(self.open_code_editor_dialog)
         self.action_docs_editor.triggered.connect(self.open_docs_editor_dialog)
+        self.action_lib_backup.triggered.connect(self.backup_installed_libraries)
+        self.action_lib_restore.triggered.connect(self.restore_libraries_backup)
         settings_action.triggered.connect(self.open_settings_dialog)
         about_action.triggered.connect(self.show_about_dialog)
         link_arduino.triggered.connect(lambda: webbrowser.open("https://arduino.github.io/arduino-cli/latest/"))
@@ -1284,7 +1470,8 @@ class VCliQtApp(QtWidgets.QMainWindow):
         form_layout.addWidget(line)
 
         dynamic_title = QtWidgets.QLabel(self.t("cfg.dynamic_board_settings", "Board settings (loaded dynamically):"))
-        dynamic_title.setStyleSheet("font-style: italic; color: #2f4858;")
+        self.dynamic_title_label = dynamic_title
+        dynamic_title.setStyleSheet("font-style: italic;")
         form_layout.addWidget(dynamic_title)
 
         self.dynamic_scroll = QtWidgets.QScrollArea()
@@ -1388,6 +1575,9 @@ class VCliQtApp(QtWidgets.QMainWindow):
         self.libs_table.horizontalHeader().setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeToContents)
         self.libs_table.horizontalHeader().setSectionResizeMode(2, QtWidgets.QHeaderView.Stretch)
         layout.addWidget(self.libs_table, 1)
+        self.libs_updates_label = QtWidgets.QLabel("AtualizaÃ§Ãµes pendentes: 0")
+        self.libs_updates_label.setObjectName("boardUpdatesLabel")
+        layout.addWidget(self.libs_updates_label)
         self.libs_refresh_btn.clicked.connect(self.load_installed_libraries)
         self.libs_zip_btn.clicked.connect(self.install_library_zip)
         self.libs_manager_btn.clicked.connect(self.open_library_manager)
@@ -1412,7 +1602,7 @@ class VCliQtApp(QtWidgets.QMainWindow):
         tab = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(tab)
         info = QtWidgets.QLabel("Git do projeto atual com branch, arquivos alterados, histórico e diff.")
-        info.setStyleSheet("color: #5b7288;")
+        self._mark_muted_label(info)
         layout.addWidget(info)
 
         self.git_views = QtWidgets.QTabWidget()
@@ -1601,7 +1791,7 @@ class VCliQtApp(QtWidgets.QMainWindow):
         tab = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(tab)
         info = QtWidgets.QLabel("Git do projeto atual com branch, arquivos alterados, histórico e diff.")
-        info.setStyleSheet("color: #5b7288;")
+        self._mark_muted_label(info)
         layout.addWidget(info)
 
         self.git_views = QtWidgets.QTabWidget()
@@ -1775,7 +1965,7 @@ class VCliQtApp(QtWidgets.QMainWindow):
         tab = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(tab)
         info = QtWidgets.QLabel("Controle Git simples do projeto atual.")
-        info.setStyleSheet("color: #5b7288;")
+        self._mark_muted_label(info)
         layout.addWidget(info)
         top = QtWidgets.QHBoxLayout()
         self.git_init_btn = QtWidgets.QPushButton("Init")
@@ -1998,7 +2188,10 @@ class VCliQtApp(QtWidgets.QMainWindow):
         label.setMinimumWidth(150)
         label.setStyleSheet("font-weight: 700;")
         value_label.setMinimumHeight(30)
-        value_label.setStyleSheet("border: 1px solid #c6d0da; border-radius: 0px; background: white; padding: 6px;")
+        if str(self.app_settings.get("theme", "light") or "light").strip().lower() == "dark":
+            value_label.setStyleSheet("border: 1px solid #334355; border-radius: 8px; background: #0f151c; color: #e5edf5; padding: 6px;")
+        else:
+            value_label.setStyleSheet("border: 1px solid #c6d0da; border-radius: 8px; background: white; color: #1e2933; padding: 6px;")
         row.addWidget(label)
         row.addWidget(value_label, 1)
         for text, callback in buttons:
@@ -2027,6 +2220,13 @@ class VCliQtApp(QtWidgets.QMainWindow):
         cfg.setdefault("editor_button_color", "#0078d4")
         cfg.setdefault("theme", "light")
         cfg.setdefault("language", "auto")
+        cfg.setdefault("tray_enabled", False)
+        cfg.setdefault("minimize_to_tray", False)
+        cfg.setdefault("close_to_tray", False)
+        cfg.setdefault("startup_to_tray", False)
+        cfg.setdefault("startup_width", 1280)
+        cfg.setdefault("startup_height", 820)
+        cfg.setdefault("single_instance", True)
         cfg.setdefault("aux_library_repo", "")
         cfg.setdefault("command_open_template", "vcli.cmd open \"{project}\"")
         cfg.setdefault("command_vscode_template", "vcli.cmd vscode \"{project}\"")
@@ -2049,6 +2249,7 @@ class VCliQtApp(QtWidgets.QMainWindow):
         settings = self._ensure_app_setting_defaults(self.app_settings)
         editor_title = str(settings.get("editor_title", "VS Code") or "VS Code").strip()
         editor_color = str(settings.get("editor_button_color", "#0078d4") or "#0078d4").strip()
+        self._apply_startup_window_size(settings)
         self.btn_vscode.setText(editor_title)
         self.btn_vscode.setStyleSheet(
             f"background: {editor_color}; color: white; border: 1px solid {editor_color}; border-radius: 8px; padding: 7px 12px; font-weight: 600;"
@@ -2056,9 +2257,100 @@ class VCliQtApp(QtWidgets.QMainWindow):
         if hasattr(self, "action_vscode"):
             self.action_vscode.setText(editor_title)
         self._apply_backend_cli_settings()
+        self._sync_tray_settings()
+
+    def _apply_startup_window_size(self, settings: dict | None = None):
+        settings = self._ensure_app_setting_defaults(settings or self.app_settings)
+        screen = QtWidgets.QApplication.primaryScreen()
+        available = screen.availableGeometry() if screen else QtCore.QRect(0, 0, 1366, 768)
+        width_limit = max(1000, available.width() - 40)
+        height_limit = max(680, available.height() - 40)
+        width = max(1000, min(int(settings.get("startup_width", 1280) or 1280), width_limit))
+        height = max(680, min(int(settings.get("startup_height", 820) or 820), height_limit))
+        self.resize(width, height)
+
+    def _create_tray_icon(self):
+        if not QtWidgets.QSystemTrayIcon.isSystemTrayAvailable():
+            return
+        tray = QtWidgets.QSystemTrayIcon(self)
+        tray.setIcon(self.windowIcon() if not self.windowIcon().isNull() else QtGui.QIcon(str(self.app_icon_path)))
+        tray.setToolTip("V CLI")
+        menu = QtWidgets.QMenu(self)
+        tray.setContextMenu(menu)
+        self.tray_menu = menu
+        self._refresh_tray_menu()
+        tray.activated.connect(lambda reason: self._restore_from_tray() if reason == QtWidgets.QSystemTrayIcon.Trigger else None)
+        self.tray_icon = tray
+        self._sync_tray_settings()
+
+    def _sync_tray_settings(self):
+        if not getattr(self, "tray_icon", None):
+            return
+        settings = self._ensure_app_setting_defaults(self.app_settings)
+        enabled = bool(settings.get("tray_enabled", True))
+        self.tray_icon.setVisible(enabled)
+        self._refresh_tray_menu()
+
+    def _refresh_tray_menu(self):
+        menu = getattr(self, "tray_menu", None)
+        if menu is None:
+            return
+        menu.clear()
+        show_action = menu.addAction("Mostrar janela")
+        hide_action = menu.addAction("Ocultar na bandeja")
+        show_action.triggered.connect(self._restore_from_tray)
+        hide_action.triggered.connect(self.hide)
+
+        menu.addSeparator()
+        project_name = self.current_project.name if self.current_project else "Nenhum projeto aberto"
+        project_action = menu.addAction(f"Projeto atual: {project_name}")
+        project_action.setEnabled(False)
+
+        compile_action = menu.addAction("Compilar")
+        export_action = menu.addAction("Exportar binario")
+        upload_action = menu.addAction("Upload")
+        open_folder_action = menu.addAction("Abrir pasta do projeto")
+        for action in [compile_action, export_action, upload_action, open_folder_action]:
+            action.setEnabled(bool(self.current_project))
+        compile_action.triggered.connect(self.compile_project)
+        export_action.triggered.connect(self.export_binary)
+        upload_action.triggered.connect(self.upload_project)
+        open_folder_action.triggered.connect(self.open_project_folder)
+
+        recent_menu = menu.addMenu("Projetos recentes")
+        if self.recent_projects:
+            for path in self.recent_projects[:8]:
+                project_path = Path(path)
+                label = project_path.name
+                if self.current_project and project_path == self.current_project:
+                    label = f"{label}  [aberto]"
+                action = recent_menu.addAction(label)
+                action.setToolTip(str(project_path))
+                action.triggered.connect(lambda checked=False, p=str(project_path): self.load_project_path(p))
+        else:
+            empty_action = recent_menu.addAction("Sem projetos recentes")
+            empty_action.setEnabled(False)
+
+        menu.addSeparator()
+        quit_action = menu.addAction("Sair")
+        quit_action.triggered.connect(self._quit_from_tray)
+
+    def _restore_from_tray(self):
+        if self.isMinimized():
+            self.showNormal()
+        else:
+            self.show()
+        self.raise_()
+        self.activateWindow()
+
+    def _quit_from_tray(self):
+        self._quitting_from_tray = True
+        if getattr(self, "tray_icon", None):
+            self.tray_icon.hide()
+        self.close()
 
     def _bundled_inocli_path(self) -> Path:
-        return Path.cwd() / "arduino-cli.exe"
+        return self.app_base_dir / "arduino-cli.exe"
 
     def _resolve_inocli_path(self) -> Path:
         settings = self._ensure_app_setting_defaults(self.app_settings)
@@ -2092,7 +2384,7 @@ class VCliQtApp(QtWidgets.QMainWindow):
 
     def _is_vcli_registered_on_path(self) -> bool:
         path_env = os.getenv("PATH", "")
-        base_dir = str(Path.cwd()).lower()
+        base_dir = str(self.app_base_dir).lower()
         for entry in path_env.split(os.pathsep):
             if entry.strip().lower() == base_dir:
                 return True
@@ -2102,7 +2394,7 @@ class VCliQtApp(QtWidgets.QMainWindow):
         if winreg is None:
             return False, "Registro do Windows não disponível."
         try:
-            base_dir = str(Path.cwd())
+            base_dir = str(self.app_base_dir)
             with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Environment", 0, winreg.KEY_READ | winreg.KEY_WRITE) as key:
                 current_path, _ = winreg.QueryValueEx(key, "Path")
                 entries = [entry for entry in str(current_path or "").split(os.pathsep) if entry.strip()]
@@ -2826,21 +3118,77 @@ class VCliQtApp(QtWidgets.QMainWindow):
         processed = pattern.sub(repl, markdown_text)
         return processed, placeholders
 
-    def _render_markdown_html(self, markdown_text: str) -> str:
+    def _render_doc_metadata_html(self, metadata: dict | None) -> str:
+        if not isinstance(metadata, dict) or not metadata:
+            return ""
+        blocks = []
+        title = str(metadata.get("title") or "").strip()
+        if title:
+            blocks.append(f'<div class="doc-meta-title">{html.escape(title)}</div>')
+        items = []
+        for key, value in metadata.items():
+            if str(key).strip().lower() == "title":
+                continue
+            text_value = ", ".join(str(x) for x in value) if isinstance(value, list) else str(value or "").strip()
+            if not text_value:
+                continue
+            items.append(
+                f'<span class="doc-meta-chip"><b>{html.escape(str(key))}:</b> {html.escape(text_value)}</span>'
+            )
+        if items:
+            blocks.append('<div class="doc-meta-row">' + "".join(items) + "</div>")
+        if not blocks:
+            return ""
+        return '<div class="doc-meta-box">' + "".join(blocks) + "</div>"
+
+    def _render_markdown_html(self, markdown_text: str, metadata: dict | None = None) -> str:
         processed, placeholders = self._mindmap_blocks_from_markdown(markdown_text)
         doc = QtGui.QTextDocument()
         doc.setMarkdown(processed)
         html_text = doc.toHtml()
         for token, html_block in placeholders.items():
             html_text = html_text.replace(html.escape(token), html_block).replace(token, html_block)
+        dark = str(self.app_settings.get("theme", "light") or "light").strip().lower() == "dark"
+        metadata_html = self._render_doc_metadata_html(metadata)
+        if dark:
+            style = (
+                "<style>"
+                "body{font-family:Segoe UI,Arial,sans-serif;padding:8px;color:#d8e7f5;background:#101418;}"
+                "h1,h2,h3,h4,h5,h6{color:#f0f6fb;}"
+                "a{color:#79c0ff;}"
+                "pre{background:#141b23;border:1px solid #334355;padding:10px;border-radius:8px;color:#d8e7f5;}"
+                "code{background:#1b2632;color:#d8e7f5;padding:1px 4px;border-radius:4px;}"
+                "li{margin:4px 0;} p{line-height:1.45;color:#d8e7f5;}"
+                ".doc-meta-box{background:#141b23;border:1px solid #334355;border-radius:12px;padding:12px;margin:0 0 14px 0;}"
+                ".doc-meta-title{font-size:22px;font-weight:800;color:#f0f6fb;margin-bottom:8px;}"
+                ".doc-meta-row{display:block;}"
+                ".doc-meta-chip{display:inline-block;background:#1b2632;border:1px solid #3a4c60;border-radius:999px;padding:5px 10px;margin:4px 8px 0 0;color:#d8e7f5;}"
+                ".mindmap-block{background:#141b23;border:1px solid #334355;border-radius:12px;padding:10px;margin:12px 0;}"
+                ".mindmap-line{margin:6px 0;}"
+                ".mindmap-node{display:inline-block;background:#1b2632;border:1px solid #3a4c60;border-radius:999px;padding:5px 10px;font-weight:600;color:#f0f6fb;}"
+                "img{max-width:100%;}"
+                "</style>"
+            )
+        else:
+            style = (
+                "<style>"
+                "body{font-family:Segoe UI,Arial,sans-serif;padding:8px;}"
+                "h1,h2,h3{color:#17324d;}"
+                "pre{background:#f4f7fa;border:1px solid #d6e0ea;padding:10px;border-radius:8px;}"
+                "code{background:#eef3f7;padding:1px 4px;border-radius:4px;}"
+                "li{margin:4px 0;} p{line-height:1.45;}"
+                ".doc-meta-box{background:#f7fbff;border:1px solid #d6e0ea;border-radius:12px;padding:12px;margin:0 0 14px 0;}"
+                ".doc-meta-title{font-size:22px;font-weight:800;color:#17324d;margin-bottom:8px;}"
+                ".doc-meta-row{display:block;}"
+                ".doc-meta-chip{display:inline-block;background:#eef6ff;border:1px solid #c7d9ee;border-radius:999px;padding:5px 10px;margin:4px 8px 0 0;color:#17324d;}"
+                ".mindmap-block{background:#fbfcfe;border:1px solid #d6e0ea;border-radius:12px;padding:10px;margin:12px 0;}"
+                ".mindmap-line{margin:6px 0;}"
+                ".mindmap-node{display:inline-block;background:#eef6ff;border:1px solid #c7d9ee;border-radius:999px;padding:5px 10px;font-weight:600;color:#17324d;}"
+                "img{max-width:100%;}"
+                "</style>"
+            )
         return (
-            "<style>body{font-family:Segoe UI,Arial,sans-serif;padding:8px;} h1,h2,h3{color:#17324d;} "
-            "pre{background:#f4f7fa;border:1px solid #d6e0ea;padding:10px;border-radius:8px;} "
-            "code{background:#eef3f7;padding:1px 4px;border-radius:4px;} li{margin:4px 0;} p{line-height:1.45;} "
-            ".mindmap-block{background:#fbfcfe;border:1px solid #d6e0ea;border-radius:12px;padding:10px;margin:12px 0;} "
-            ".mindmap-line{margin:6px 0;} .mindmap-node{display:inline-block;background:#eef6ff;border:1px solid #c7d9ee;"
-            "border-radius:999px;padding:5px 10px;font-weight:600;color:#17324d;} img{max-width:100%;}</style>"
-            + html_text
+            style + metadata_html + html_text
         )
 
     def _render_git_diff_html(self, diff_text: str) -> str:
@@ -2868,6 +3216,7 @@ class VCliQtApp(QtWidgets.QMainWindow):
         dialog.setWindowTitle("Ajuda da documentação")
         self.fit_dialog_to_screen(dialog, 760, 620)
         layout = QtWidgets.QVBoxLayout(dialog)
+        dark = str(self.app_settings.get("theme", "light") or "light").strip().lower() == "dark"
         browser = QtWidgets.QTextBrowser()
         browser.setHtml(
             "<h2>Metadados disponíveis</h2>"
@@ -2915,9 +3264,9 @@ class VCliQtApp(QtWidgets.QMainWindow):
         md_path = Path(item.data(QtCore.Qt.UserRole))
         if not md_path.exists():
             return
-        _, body = self._parse_doc_file(md_path)
+        metadata, body = self._parse_doc_file(md_path)
         self.docs_content.document().setBaseUrl(QtCore.QUrl.fromLocalFile(str(md_path.parent.resolve()) + os.sep))
-        self.docs_content.setHtml(self._render_markdown_html(body))
+        self.docs_content.setHtml(self._render_markdown_html(body, metadata))
 
     def show_project_readme(self):
         if not self.current_project:
@@ -2933,8 +3282,8 @@ class VCliQtApp(QtWidgets.QMainWindow):
         browser = QtWidgets.QTextBrowser()
         browser.setOpenExternalLinks(True)
         browser.document().setBaseUrl(QtCore.QUrl.fromLocalFile(str(readme_path.parent.resolve()) + os.sep))
-        _, body = self._parse_doc_file(readme_path)
-        browser.setHtml(self._render_markdown_html(body))
+        metadata, body = self._parse_doc_file(readme_path)
+        browser.setHtml(self._render_markdown_html(body, metadata))
         layout.addWidget(browser, 1)
         buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok)
         buttons.accepted.connect(dialog.accept)
@@ -2997,8 +3346,8 @@ class VCliQtApp(QtWidgets.QMainWindow):
                 preview.setHtml("<p>Nenhum documento selecionado.</p>")
                 return
             preview.document().setBaseUrl(QtCore.QUrl.fromLocalFile(str(md_path.parent.resolve()) + os.sep))
-            _, body = self._parse_doc_file(md_path)
-            preview.setHtml(self._render_markdown_html(body))
+            metadata, body = self._parse_doc_file(md_path)
+            preview.setHtml(self._render_markdown_html(body, metadata))
 
         def create_doc():
             self._create_doc_file()
@@ -3153,6 +3502,37 @@ class VCliQtApp(QtWidgets.QMainWindow):
         self._refresh_git_diff_view()
 
     def _refresh_git_diff_view(self):
+        if hasattr(self, "git_diff_view") and self.current_project:
+            mode = getattr(self, "git_diff_source", "file")
+            if mode == "commit":
+                row = self.git_commit_table.currentRow() if hasattr(self, "git_commit_table") else -1
+                if row < 0:
+                    self.git_diff_plain_text = "Selecione um commit para ver o diff."
+                    self.git_diff_view.setHtml(self._render_git_diff_html(self.git_diff_plain_text))
+                    return
+                item = self.git_commit_table.item(row, 1)
+                if not item:
+                    self.git_diff_plain_text = "Selecione um commit para ver o diff."
+                    self.git_diff_view.setHtml(self._render_git_diff_html(self.git_diff_plain_text))
+                    return
+                commit_hash = str(item.data(QtCore.Qt.UserRole) or item.text())
+                _, diff_out, diff_err = self._git_capture(["show", "--stat", "--patch", "--format=medium", commit_hash], timeout=60)
+                self.git_diff_plain_text = diff_out or diff_err or "Sem diff disponivel."
+                self.git_diff_view.setHtml(self._render_git_diff_html(self.git_diff_plain_text))
+                return
+
+            current_item = self.git_changed_files.currentItem() if hasattr(self, "git_changed_files") else None
+            if not current_item:
+                self.git_diff_plain_text = "Selecione um arquivo alterado para ver o diff."
+                self.git_diff_view.setHtml(self._render_git_diff_html(self.git_diff_plain_text))
+                return
+            file_name = str(current_item.data(0, QtCore.Qt.UserRole) or current_item.text(0))
+            _, diff_out, diff_err = self._git_capture(["diff", "--", file_name], timeout=60)
+            if not diff_out:
+                _, diff_out, diff_err = self._git_capture(["diff", "--cached", "--", file_name], timeout=60)
+            self.git_diff_plain_text = diff_out or diff_err or "Sem diff disponivel para este arquivo."
+            self.git_diff_view.setHtml(self._render_git_diff_html(self.git_diff_plain_text))
+            return
         if not hasattr(self, "git_diff_view") or not self.current_project:
             return
         mode = getattr(self, "git_diff_source", "file")
@@ -3181,6 +3561,29 @@ class VCliQtApp(QtWidgets.QMainWindow):
         self.git_diff_view.setHtml(self._render_git_diff_html(diff_out or diff_err or "Sem diff disponível para este arquivo."))
 
     def _open_git_diff_dialog(self):
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle("Diff Expandido")
+        self.fit_dialog_to_screen(dialog, 1100, 760)
+        layout = QtWidgets.QVBoxLayout(dialog)
+        info = QtWidgets.QLabel("Visualizacao ampliada do patch atual, com render colorido e diff bruto.")
+        info.setWordWrap(True)
+        self._mark_muted_label(info)
+        layout.addWidget(info)
+        split = QtWidgets.QSplitter(QtCore.Qt.Vertical)
+        browser = QtWidgets.QTextBrowser()
+        browser.setHtml(self.git_diff_view.toHtml() if hasattr(self, "git_diff_view") else "")
+        split.addWidget(browser)
+        raw_box = QtWidgets.QPlainTextEdit()
+        raw_box.setReadOnly(True)
+        raw_box.setPlainText(getattr(self, "git_diff_plain_text", ""))
+        split.addWidget(raw_box)
+        split.setSizes([430, 290])
+        layout.addWidget(split, 1)
+        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok)
+        buttons.accepted.connect(dialog.accept)
+        layout.addWidget(buttons)
+        dialog.exec_()
+        return
         dialog = QtWidgets.QDialog(self)
         dialog.setWindowTitle("Diff")
         self.fit_dialog_to_screen(dialog, 1100, 760)
@@ -3344,6 +3747,7 @@ class VCliQtApp(QtWidgets.QMainWindow):
         self.recent_projects = self.recent_projects[:20]
         self._save_recent_projects()
         self.load_recent_projects_widget()
+        self._refresh_tray_menu()
 
     def _update_history_icon(self):
         icon_path = self.default_project_icon_path
@@ -3388,6 +3792,43 @@ class VCliQtApp(QtWidgets.QMainWindow):
             return -1
         return 0
 
+    def _build_resolution_prompt(self, title: str, error_msg: str, output: str = "") -> str:
+        project_name = self.current_project.name if self.current_project else "sem_projeto"
+        parts = [
+            "Analise este erro de compilação/upload do Arduino CLI e proponha uma resolução objetiva.",
+            f"Tarefa: {title}",
+            f"Projeto: {project_name}",
+            "",
+            "Erro principal:",
+            str(error_msg or "Erro não informado").strip(),
+        ]
+        clean_output = str(output or "").strip()
+        if clean_output:
+            parts.extend(
+                [
+                    "",
+                    "Output completo relevante:",
+                    clean_output[:12000],
+                ]
+            )
+        parts.extend(
+            [
+                "",
+                "Quero:",
+                "1. causa provável",
+                "2. passos para corrigir",
+                "3. se possível, o comando ou ajuste exato",
+            ]
+        )
+        return "\n".join(parts)
+
+    def _open_error_search_dialog(self, title: str, error_msg: str, output: str = ""):
+        query = f"Arduino CLI {title} {error_msg} {output[:400]}"
+        url = "https://www.google.com/search?q=" + urllib.parse.quote_plus(query)
+        dialog = WebBrowserQt(self, f"Pesquisar erro - {title}")
+        dialog.load_url(url)
+        dialog.exec_()
+
     def show_error_dialog(self, title: str, error_msg: str, output: str = ""):
         dialog = QtWidgets.QDialog(self)
         dialog.setWindowTitle(f"Erro em {title}")
@@ -3407,6 +3848,30 @@ class VCliQtApp(QtWidgets.QMainWindow):
             out_box.setReadOnly(True)
             out_box.setPlainText(output[:12000])
             layout.addWidget(out_box, 1)
+        buttons_row = QtWidgets.QHBoxLayout()
+        copy_error_btn = QtWidgets.QPushButton("Copiar erro")
+        copy_prompt_btn = QtWidgets.QPushButton("Copiar prompt")
+        search_btn = QtWidgets.QPushButton("Pesquisar")
+        buttons_row.addWidget(copy_error_btn)
+        buttons_row.addWidget(copy_prompt_btn)
+        buttons_row.addWidget(search_btn)
+        buttons_row.addStretch(1)
+        layout.addLayout(buttons_row)
+
+        def copy_error():
+            QtWidgets.QApplication.clipboard().setText(
+                "\n\n".join(part for part in [str(error_msg or "").strip(), str(output or "").strip()] if part)
+            )
+            self.log(f"[COPY] Erro copiado: {title}")
+
+        def copy_prompt():
+            QtWidgets.QApplication.clipboard().setText(self._build_resolution_prompt(title, error_msg, output))
+            self.log(f"[COPY] Prompt de resolução copiado: {title}")
+
+        copy_error_btn.clicked.connect(copy_error)
+        copy_prompt_btn.clicked.connect(copy_prompt)
+        search_btn.clicked.connect(lambda: self._open_error_search_dialog(title, error_msg, output))
+
         buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok)
         buttons.accepted.connect(dialog.accept)
         layout.addWidget(buttons)
@@ -3518,6 +3983,7 @@ class VCliQtApp(QtWidgets.QMainWindow):
         self._ensure_project_property_defaults()
         self.add_to_recent(path)
         self.update_project_info()
+        self._refresh_tray_menu()
 
     def update_project_info(self):
         if not self.current_project or not self.current_config:
@@ -4203,7 +4669,7 @@ class VCliQtApp(QtWidgets.QMainWindow):
             "Ajuste o comportamento global do V CLI. Estas opcoes afetam a experiencia inteira, nao so o projeto atual."
         )
         intro.setWordWrap(True)
-        intro.setStyleSheet("color: #5b7288;")
+        self._mark_muted_label(intro)
         outer.addWidget(intro)
         body = QtWidgets.QHBoxLayout()
         nav = QtWidgets.QListWidget()
@@ -4228,11 +4694,41 @@ class VCliQtApp(QtWidgets.QMainWindow):
         language_combo.addItem("English", "en")
         lang_index = language_combo.findData(settings.get("language", "auto"))
         language_combo.setCurrentIndex(lang_index if lang_index >= 0 else 0)
+        tray_enabled = QtWidgets.QCheckBox("Ativar bandeja do Windows")
+        tray_enabled.setChecked(bool(settings.get("tray_enabled", False)))
+        minimize_to_tray = QtWidgets.QCheckBox("Ao minimizar, enviar para a bandeja")
+        minimize_to_tray.setChecked(bool(settings.get("minimize_to_tray", False)))
+        close_to_tray = QtWidgets.QCheckBox("Ao fechar, ocultar na bandeja em vez de encerrar")
+        close_to_tray.setChecked(bool(settings.get("close_to_tray", False)))
+        startup_to_tray = QtWidgets.QCheckBox("Iniciar oculto na bandeja")
+        startup_to_tray.setChecked(bool(settings.get("startup_to_tray", False)))
+        single_instance = QtWidgets.QCheckBox("Bloquear múltiplas instâncias da aplicação")
+        single_instance.setChecked(bool(settings.get("single_instance", True)))
+        startup_width = QtWidgets.QSpinBox()
+        startup_width.setRange(1000, 4096)
+        startup_width.setSingleStep(20)
+        startup_width.setSuffix(" px")
+        startup_width.setValue(int(settings.get("startup_width", 1280) or 1280))
+        startup_height = QtWidgets.QSpinBox()
+        startup_height.setRange(680, 2160)
+        startup_height.setSingleStep(20)
+        startup_height.setSuffix(" px")
+        startup_height.setValue(int(settings.get("startup_height", 820) or 820))
         language_note = QtWidgets.QLabel("Idioma e tema são aplicados após salvar. O idioma pode exigir reiniciar a aplicação para refletir tudo.")
         language_note.setWordWrap(True)
-        general_form.addRow(QtWidgets.QLabel("Tema e idioma deixam o ambiente mais coerente para quem usa a ferramenta no dia a dia."))
+        self._mark_muted_label(language_note)
+        general_intro = QtWidgets.QLabel("Tema e idioma deixam o ambiente mais coerente para quem usa a ferramenta no dia a dia.")
+        self._mark_muted_label(general_intro)
+        general_form.addRow(general_intro)
         general_form.addRow("Tema:", theme_combo)
         general_form.addRow("Idioma:", language_combo)
+        general_form.addRow("", tray_enabled)
+        general_form.addRow("", minimize_to_tray)
+        general_form.addRow("", close_to_tray)
+        general_form.addRow("", startup_to_tray)
+        general_form.addRow("Largura inicial:", startup_width)
+        general_form.addRow("Altura inicial:", startup_height)
+        general_form.addRow("", single_instance)
         general_form.addRow(language_note)
         stack.addWidget(general_page)
 
@@ -4251,7 +4747,9 @@ class VCliQtApp(QtWidgets.QMainWindow):
         editor_form.addRow("Título do editor:", editor_title)
         editor_form.addRow("Comando do editor:", editor_command)
         editor_form.addRow("Cor do botão:", self._wrap_layout(color_row))
-        editor_form.addRow(QtWidgets.QLabel("Exemplos de comando: `code`, `cursor`, caminho completo do editor."))
+        editor_help = QtWidgets.QLabel("Exemplos de comando: `code`, `cursor`, caminho completo do editor.")
+        self._mark_muted_label(editor_help)
+        editor_form.addRow(editor_help)
         stack.addWidget(editor_page)
 
         libs_page = QtWidgets.QWidget()
@@ -4260,8 +4758,10 @@ class VCliQtApp(QtWidgets.QMainWindow):
         aux_repo.setPlaceholderText("URL opcional de um library_index.json alternativo")
         aux_info = QtWidgets.QLabel("Repositório auxiliar de bibliotecas (experimental). Use URL direta quando necessário.")
         aux_info.setWordWrap(True)
+        self._mark_muted_label(aux_info)
         default_lib_info = QtWidgets.QLabel("Padrão atual: índice padrão do Arduino CLI em Arduino15/library_index.json.")
         default_lib_info.setWordWrap(True)
+        self._mark_muted_label(default_lib_info)
         libs_form.addRow("Servidor / URL auxiliar:", aux_repo)
         libs_form.addRow(aux_info)
         libs_form.addRow(default_lib_info)
@@ -4313,6 +4813,7 @@ class VCliQtApp(QtWidgets.QMainWindow):
             "Você também pode usar o pré-instalado no PATH do Windows ou apontar um executável personalizado."
         )
         inocli_help.setWordWrap(True)
+        self._mark_muted_label(inocli_help)
         inocli_layout.addRow("Origem:", inocli_mode)
         inocli_layout.addRow("Caminho personalizado:", self._wrap_layout(inocli_path_row))
         inocli_layout.addRow("Caminho em uso:", inocli_effective_path)
@@ -4384,8 +4885,19 @@ class VCliQtApp(QtWidgets.QMainWindow):
                 self.show_error_dialog("JSONs de placas", err or "Falha ao remover URL", out)
 
         def save_settings():
+            screen = QtWidgets.QApplication.primaryScreen()
+            available = screen.availableGeometry() if screen else QtCore.QRect(0, 0, 1366, 768)
+            width_limit = max(1000, available.width() - 40)
+            height_limit = max(680, available.height() - 40)
             self.app_settings["theme"] = theme_combo.currentData() or "light"
             self.app_settings["language"] = language_combo.currentData() or "auto"
+            self.app_settings["tray_enabled"] = tray_enabled.isChecked()
+            self.app_settings["minimize_to_tray"] = minimize_to_tray.isChecked()
+            self.app_settings["close_to_tray"] = close_to_tray.isChecked()
+            self.app_settings["startup_to_tray"] = startup_to_tray.isChecked()
+            self.app_settings["startup_width"] = max(1000, min(int(startup_width.value()), width_limit))
+            self.app_settings["startup_height"] = max(680, min(int(startup_height.value()), height_limit))
+            self.app_settings["single_instance"] = single_instance.isChecked()
             self.app_settings["editor_title"] = editor_title.text().strip() or "VS Code"
             self.app_settings["editor_command"] = editor_command.text().strip() or "code"
             self.app_settings["editor_button_color"] = editor_color.text().strip() or "#0078d4"
@@ -4663,8 +5175,12 @@ class VCliQtApp(QtWidgets.QMainWindow):
         dialog.setWindowTitle("About V CLI")
         self.fit_dialog_to_screen(dialog, 820, 620)
         layout = QtWidgets.QVBoxLayout(dialog)
+        dark = str(self.app_settings.get("theme", "light") or "light").strip().lower() == "dark"
         hero = QtWidgets.QFrame()
-        hero.setStyleSheet("QFrame { background: qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 #edf6ff, stop:1 #d8ebff); border: 1px solid #c9ddf5; border-radius: 16px; }")
+        if dark:
+            hero.setStyleSheet("QFrame { background: qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 #162534, stop:1 #0f1b27); border: 1px solid #334355; border-radius: 16px; }")
+        else:
+            hero.setStyleSheet("QFrame { background: qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 #edf6ff, stop:1 #d8ebff); border: 1px solid #c9ddf5; border-radius: 16px; }")
         hero_layout = QtWidgets.QHBoxLayout(hero)
         icon_label = QtWidgets.QLabel()
         pixmap = QtGui.QPixmap(str(self.app_icon_path))
@@ -4674,9 +5190,9 @@ class VCliQtApp(QtWidgets.QMainWindow):
         hero_layout.addWidget(icon_label)
         text_col = QtWidgets.QVBoxLayout()
         title = QtWidgets.QLabel("V CLI")
-        title.setStyleSheet("font-size: 28px; font-weight: 800; color: #17324d;")
+        title.setStyleSheet(f"font-size: 28px; font-weight: 800; color: {'#f0f6fb' if dark else '#17324d'};")
         subtitle = QtWidgets.QLabel("Compilador profissionalizado de código aberto baseado em Arduino CLI")
-        subtitle.setStyleSheet("font-size: 13px; color: #4b5563;")
+        subtitle.setStyleSheet(f"font-size: 13px; color: {'#b8cadb' if dark else '#4b5563'};")
         text_col.addWidget(title)
         text_col.addWidget(subtitle)
         hero_layout.addLayout(text_col, 1)
@@ -4687,7 +5203,10 @@ class VCliQtApp(QtWidgets.QMainWindow):
             "Python 3 • PyQt5 • Arduino CLI • VS Code • pyserial"
         )
         tech.setWordWrap(True)
-        tech.setStyleSheet("padding: 10px 12px; background: #f7fbff; border: 1px solid #d7e6f3; border-radius: 12px;")
+        if dark:
+            tech.setStyleSheet("padding: 10px 12px; background: #141b23; border: 1px solid #334355; border-radius: 12px; color: #d8e7f5;")
+        else:
+            tech.setStyleSheet("padding: 10px 12px; background: #f7fbff; border: 1px solid #d7e6f3; border-radius: 12px;")
         layout.addWidget(tech)
 
         licenses = QtWidgets.QTextBrowser()
@@ -4877,11 +5396,13 @@ class VCliQtApp(QtWidgets.QMainWindow):
             libs = []
             ports = []
             updates = []
+            lib_updates = []
             try:
                 boards = self.backend.list_boards()
                 libs = self.backend.list_libraries_fixed()
                 ports = self.get_serial_ports()
                 updates = self.backend.list_core_updates()
+                lib_updates = self.backend.list_library_updates()
             except Exception as exc:
                 error_msg = str(exc)
 
@@ -4893,7 +5414,7 @@ class VCliQtApp(QtWidgets.QMainWindow):
                 if error_msg:
                     self.log(f"[WARN] Falha no carregamento inicial: {error_msg}")
                 self.populate_boards_table(boards)
-                self.populate_installed_libraries(libs)
+                self.populate_installed_libraries(libs, lib_updates)
                 self.available_ports = ports
                 self.update_board_updates_count(len(updates or []))
                 self.refresh_serial_ports()
@@ -4930,9 +5451,17 @@ class VCliQtApp(QtWidgets.QMainWindow):
         self.board_updates_count = int(count or 0)
         self._refresh_board_updates_indicator()
 
+    def update_libs_updates_count(self, count: int):
+        self.libs_updates_count = int(count or 0)
+        self._refresh_libs_updates_indicator()
+
     def _toggle_board_updates_flash(self):
         self.board_updates_flash_on = not self.board_updates_flash_on
         self._refresh_board_updates_indicator()
+
+    def _toggle_libs_updates_flash(self):
+        self.libs_updates_flash_on = not self.libs_updates_flash_on
+        self._refresh_libs_updates_indicator()
 
     def _refresh_board_updates_indicator(self):
         if not hasattr(self, "board_updates_label"):
@@ -4959,6 +5488,38 @@ class VCliQtApp(QtWidgets.QMainWindow):
                 self.board_updates_timer.stop()
             self.board_updates_label.setStyleSheet(
                 "color: #6b7280; font-size: 12px; font-weight: 600; padding: 4px 8px;"
+            )
+
+    def _refresh_libs_updates_indicator(self):
+        if not hasattr(self, "libs_updates_label"):
+            return
+        count = self.libs_updates_count
+        self.libs_updates_label.setText(f"{self.t('mgr.filter.updates', 'Pending updates')}: {count}")
+        is_libs_tab = self.tabs.currentWidget() is self.libs_table.parentWidget()
+        dark = str(self.app_settings.get("theme", "light") or "light").strip().lower() == "dark"
+        neutral = "#9aa8b6" if dark else "#6b7280"
+        warn = "#ff8a65" if dark else "#9a3412"
+        flash_a = "#ff6b6b" if dark else "#c62828"
+        flash_b = "#d9485f" if dark else "#7f1d1d"
+        if count > 0 and is_libs_tab:
+            if not self.libs_updates_timer.isActive():
+                self.libs_updates_flash_on = True
+                self.libs_updates_timer.start()
+            color = flash_a if self.libs_updates_flash_on else flash_b
+            self.libs_updates_label.setStyleSheet(
+                f"color: {color}; font-size: 13px; font-weight: 800; padding: 4px 8px;"
+            )
+        elif count > 0:
+            if self.libs_updates_timer.isActive():
+                self.libs_updates_timer.stop()
+            self.libs_updates_label.setStyleSheet(
+                f"color: {warn}; font-size: 12px; font-weight: 700; padding: 4px 8px;"
+            )
+        else:
+            if self.libs_updates_timer.isActive():
+                self.libs_updates_timer.stop()
+            self.libs_updates_label.setStyleSheet(
+                f"color: {neutral}; font-size: 12px; font-weight: 600; padding: 4px 8px;"
             )
 
     def select_board_from_table(self):
@@ -5055,7 +5616,8 @@ class VCliQtApp(QtWidgets.QMainWindow):
             return
         self.clear_dynamic_board_details()
         loading = QtWidgets.QLabel("Carregando configurações da placa...")
-        loading.setStyleSheet("font-style: italic; color: #355c7d;")
+        loading.setObjectName("mutedLabel")
+        loading.setStyleSheet("font-style: italic;")
         self.dynamic_form.insertWidget(0, loading)
 
         def worker():
@@ -5137,6 +5699,38 @@ class VCliQtApp(QtWidgets.QMainWindow):
     def populate_installed_libraries(self, libs, updates=None):
         self.loaded_libraries = libs or []
         updates_by_name = {str(item.get("name", "")).strip().lower(): item for item in (updates or [])}
+        self.update_libs_updates_count(len(updates_by_name))
+        self.libs_table.setRowCount(len(self.loaded_libraries))
+        for row, lib in enumerate(self.loaded_libraries):
+            name = lib.get("name", "")
+            version = lib.get("version", "")
+            desc = (lib.get("sentence", "") or "")[:120]
+            update_info = updates_by_name.get(str(name).strip().lower())
+            version_text = version
+            if update_info:
+                version_text = f"{version}  [update: {update_info.get('latest_version', '')}]"
+            items = [
+                QtWidgets.QTableWidgetItem(name),
+                QtWidgets.QTableWidgetItem(version_text),
+                QtWidgets.QTableWidgetItem(desc),
+            ]
+            if update_info:
+                for item in items:
+                    item.setBackground(QtGui.QColor("#fff3cd"))
+                    item.setForeground(QtGui.QColor("#7a4f01"))
+                    font = item.font()
+                    font.setBold(True)
+                    item.setFont(font)
+                    item.setToolTip(f"Atualizacao disponivel para {name}")
+            else:
+                for item in items:
+                    item.setToolTip("Biblioteca instalada sem atualizacao pendente no catalogo atual.")
+            self.libs_table.setItem(row, 0, items[0])
+            self.libs_table.setItem(row, 1, items[1])
+            self.libs_table.setItem(row, 2, items[2])
+        return
+        self.loaded_libraries = libs or []
+        updates_by_name = {str(item.get("name", "")).strip().lower(): item for item in (updates or [])}
         self.libs_table.setRowCount(len(self.loaded_libraries))
         for row, lib in enumerate(self.loaded_libraries):
             name = lib.get("name", "")
@@ -5167,6 +5761,129 @@ class VCliQtApp(QtWidgets.QMainWindow):
         if not path:
             return
         self.run_project_action("Instalando biblioteca ZIP", lambda: self.backend.install_library_zip_sync(path))
+
+    def run_project_action(self, title: str, action, success_title: str = "", on_success=None, abortable: bool = False):
+        debug_lines = [
+            f"[ACTION] {title}",
+            f"Projeto: {self.current_project.name if self.current_project else 'N/A'}",
+        ]
+        dialog = ActionProgressDialog(
+            self,
+            title,
+            "Executando operaÃ§Ã£o...",
+            debug_lines,
+            abort_callback=(lambda: self._request_abort_action(dialog)) if abortable else None,
+        )
+        self.fit_dialog_to_screen(dialog, 700, 480)
+
+        def worker():
+            result = action()
+            if not isinstance(result, tuple):
+                result = ("", False, "Retorno invÃ¡lido da operaÃ§Ã£o")
+            output = result[0] if len(result) > 0 else ""
+            success = bool(result[1]) if len(result) > 1 else False
+            error_msg = result[2] if len(result) > 2 else ""
+
+            def done():
+                dialog.finish()
+                if not success:
+                    if str(error_msg or "").strip().lower() == "operacao abortada pelo usuario":
+                        self.log(output or f"[ABORT] {title}")
+                        QtWidgets.QMessageBox.information(self, title, output or "OperaÃ§Ã£o abortada pelo usuÃ¡rio.")
+                        return
+                    self.show_error_dialog(title, error_msg or "OperaÃ§Ã£o falhou", output)
+                    return
+                self.log(output or f"[OK] {title}")
+                if callable(on_success):
+                    on_success(output)
+                if success_title:
+                    QtWidgets.QMessageBox.information(self, success_title, output or "OperaÃ§Ã£o concluÃ­da com sucesso.")
+
+            self.bridge.invoke.emit(done)
+
+        threading.Thread(target=worker, daemon=True).start()
+        dialog.exec_()
+
+    def backup_installed_libraries(self):
+        if not self.current_project:
+            QtWidgets.QMessageBox.information(self, "Backup de bibliotecas", "Abra um projeto para salvar o backup das bibliotecas.")
+            return
+
+        def after_success(_output):
+            self.load_installed_libraries()
+
+        self.run_project_action(
+            "Backup de bibliotecas",
+            lambda: self.backend.create_libraries_backup(str(self.current_project)),
+            success_title="Backup de bibliotecas",
+            on_success=after_success,
+            abortable=True,
+        )
+
+    def restore_libraries_backup(self):
+        start_dir = str(self.current_project if self.current_project else Path.cwd())
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Selecionar backup de bibliotecas", start_dir, "ZIP (*.zip)")
+        if not path:
+            return
+
+        info, ok, err = self.backend.inspect_libraries_backup(path)
+        if not ok:
+            self.show_error_dialog("Restaurar backup de bibliotecas", err or "NÃ£o foi possÃ­vel ler o backup.")
+            return
+
+        conflicts = info.get("conflicts", [])
+        overwrite_existing = False
+        if conflicts:
+            lines = [
+                "Foram encontradas bibliotecas jÃ¡ instaladas.",
+                "",
+                "VersÃµes em conflito:",
+            ]
+            for item in conflicts[:15]:
+                lines.append(
+                    f"- {item.get('name', '?')}: instalada {item.get('installed_version', 'N/A')} | backup {item.get('backup_version', 'N/A')}"
+                )
+            if len(conflicts) > 15:
+                lines.append(f"- ... e mais {len(conflicts) - 15} conflito(s)")
+            lines.extend(
+                [
+                    "",
+                    "Sim: sobrescrever as instaladas",
+                    "NÃ£o: manter as instaladas e restaurar apenas as faltantes",
+                    "Cancelar: abortar agora",
+                ]
+            )
+            answer = QtWidgets.QMessageBox.question(
+                self,
+                "Restaurar backup de bibliotecas",
+                "\n".join(lines),
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No | QtWidgets.QMessageBox.Cancel,
+                QtWidgets.QMessageBox.No,
+            )
+            if answer == QtWidgets.QMessageBox.Cancel:
+                return
+            overwrite_existing = answer == QtWidgets.QMessageBox.Yes
+        else:
+            answer = QtWidgets.QMessageBox.question(
+                self,
+                "Restaurar backup de bibliotecas",
+                f"Restaurar {info.get('library_count', 0)} biblioteca(s) do backup agora?",
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                QtWidgets.QMessageBox.Yes,
+            )
+            if answer != QtWidgets.QMessageBox.Yes:
+                return
+
+        def after_success(_output):
+            self.load_installed_libraries()
+
+        self.run_project_action(
+            "Restaurando backup de bibliotecas",
+            lambda: self.backend.restore_libraries_backup(path, overwrite_existing=overwrite_existing),
+            success_title="Restaurar backup de bibliotecas",
+            on_success=after_success,
+            abortable=True,
+        )
 
     def open_library_manager(self):
         dialog = LibraryManagerDialog(self)
@@ -5680,11 +6397,58 @@ class VCliQtApp(QtWidgets.QMainWindow):
             index = combo.findText(text)
         combo.setCurrentIndex(max(index, 0))
 
+    def changeEvent(self, event):
+        if event.type() == QtCore.QEvent.WindowStateChange:
+            settings = self._ensure_app_setting_defaults(self.app_settings)
+            if (
+                bool(settings.get("tray_enabled", True))
+                and bool(settings.get("minimize_to_tray", True))
+                and self.isMinimized()
+                and getattr(self, "tray_icon", None)
+            ):
+                QtCore.QTimer.singleShot(0, self.hide)
+        super().changeEvent(event)
 
-def run():
+    def closeEvent(self, event):
+        settings = self._ensure_app_setting_defaults(self.app_settings)
+        if self._quitting_from_tray:
+            event.accept()
+            return
+        if (
+            bool(settings.get("tray_enabled", True))
+            and bool(settings.get("close_to_tray", True))
+            and getattr(self, "tray_icon", None)
+        ):
+            event.ignore()
+            self.hide()
+            return
+        if getattr(self, "tray_icon", None):
+            self.tray_icon.hide()
+        event.accept()
+
+
+def run(initial_project: str | None = None):
     qt_app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
     window = VCliQtApp()
-    window.show()
+    if initial_project:
+        try:
+            target = Path(initial_project)
+            if target.is_file():
+                target = target.parent
+            if target.exists():
+                window.load_project_path(str(target))
+        except Exception:
+            pass
+    settings = window._ensure_app_setting_defaults(window.app_settings)
+    startup_to_tray = (
+        bool(settings.get("tray_enabled", False))
+        and bool(settings.get("startup_to_tray", False))
+        and getattr(window, "tray_icon", None)
+    )
+    if startup_to_tray:
+        window.hide()
+    else:
+        window.show()
     return qt_app.exec_()
 
 
