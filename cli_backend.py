@@ -385,7 +385,12 @@ class CLIBackend:
                 "author": "",
                 "version": "1.0.0",
                 "contributors": "",
-                "description": ""
+                "description": "",
+                "icon": "",
+                "autoversion_mode": "disabled",
+                "autoversion_file": "",
+                "autoversion_variable": "VERSION",
+                "autoversion_kind": "string"
             }
         }
         

@@ -8,6 +8,7 @@ import subprocess
 import sys
 import threading
 import time
+import webbrowser
 from datetime import datetime
 from pathlib import Path
 
@@ -28,7 +29,7 @@ class LibraryManagerDialog(QtWidgets.QDialog):
         self.app = parent
         self.backend = parent.backend
         self.setWindowTitle(self.app.t("mgr.lib.title", "Library Manager"))
-        self.resize(1080, 700)
+        self.app.fit_dialog_to_screen(self, 1040, 620)
         self.items = []
         self.runtime_busy = False
         self._build_ui()
@@ -322,7 +323,7 @@ class BoardManagerDialog(QtWidgets.QDialog):
         self.app = parent
         self.backend = parent.backend
         self.setWindowTitle(self.app.t("mgr.board.title", "Board Manager"))
-        self.resize(1080, 720)
+        self.app.fit_dialog_to_screen(self, 1040, 620)
         self.items = []
         self.urls = []
         self.runtime_busy = False
@@ -796,6 +797,11 @@ class ActionResultDialog(QtWidgets.QDialog):
 class VCliQtApp(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
+        appdata_local = Path(os.getenv("LOCALAPPDATA") or (Path.home() / "AppData" / "Local"))
+        self.appdata_dir = appdata_local / "Arduino15" / "V-CLI"
+        self.appdata_dir.mkdir(parents=True, exist_ok=True)
+        self.app_settings_file = self.appdata_dir / "settings.json"
+        self.app_settings = self._load_app_settings()
         self.locale_dir = Path.cwd() / "locales"
         self.translations = {}
         self.lang = "en"
@@ -814,13 +820,8 @@ class VCliQtApp(QtWidgets.QMainWindow):
         self.serial_tx_log = []
         self.available_ports = []
         self.baud_options = ["9600", "19200", "38400", "57600", "115200"]
-        appdata_local = Path(os.getenv("LOCALAPPDATA") or (Path.home() / "AppData" / "Local"))
-        self.appdata_dir = appdata_local / "Arduino15" / "V-CLI"
-        self.appdata_dir.mkdir(parents=True, exist_ok=True)
         self.recent_projects_file = self.appdata_dir / "recent_projects.json"
-        self.app_settings_file = self.appdata_dir / "settings.json"
         self.app_icon_path = Path.cwd() / ".ico"
-        self.app_settings = self._load_app_settings()
         self.recent_projects = []
         self._load_recent_projects()
         self.boards_cache = []
@@ -867,6 +868,9 @@ class VCliQtApp(QtWidgets.QMainWindow):
         self.translations = {**base, **overlay}
 
     def _detect_system_lang(self):
+        preferred = str(getattr(self, "app_settings", {}).get("language", "auto") or "auto").strip().lower()
+        if preferred in {"pt", "en"}:
+            return preferred
         try:
             loc = locale.getdefaultlocale()[0] if locale.getdefaultlocale() else ""
             if not loc:
@@ -881,6 +885,28 @@ class VCliQtApp(QtWidgets.QMainWindow):
         return self.translations.get(key, default or key)
 
     def _apply_styles(self):
+        theme = str(self.app_settings.get("theme", "light") or "light").strip().lower()
+        if theme == "dark":
+            self.setStyleSheet(
+                """
+                QMainWindow, QDialog { background: #101418; color: #e5edf5; }
+                QFrame#sidePanel { background: #16202a; border: 1px solid #293544; border-radius: 12px; }
+                QListWidget#recentProjects { font-size: 13px; padding: 4px; }
+                QListWidget#recentProjects::item { min-height: 28px; border-radius: 6px; padding: 4px 8px; }
+                QListWidget#recentProjects::item:selected { background: #28435c; color: white; }
+                QLabel#historyBanner { font-size: 14px; font-weight: 800; color: #f0f6fb; padding: 4px 8px; background: rgba(255,255,255,0.06); border: 1px solid #32465a; border-radius: 10px; }
+                QLabel#boardUpdatesLabel { font-size: 12px; font-weight: 700; color: #9aa8b6; padding: 4px 8px; }
+                QLabel#sectionTitle, QLabel#managerTitle { font-size: 15px; font-weight: 700; color: #f0f6fb; }
+                QPushButton { background: #1a2530; color: #e5edf5; border: 1px solid #334355; border-radius: 8px; padding: 7px 12px; font-weight: 600; }
+                QPushButton:hover { border-color: #6b8ba7; }
+                QTabWidget::pane, QGroupBox { border: 1px solid #293544; border-radius: 10px; background: #141b23; }
+                QTabBar::tab { background: #1e2a36; border: 1px solid #293544; padding: 8px 14px; border-top-left-radius: 8px; border-top-right-radius: 8px; margin-right: 2px; color: #e5edf5; }
+                QTabBar::tab:selected { background: #141b23; }
+                QPlainTextEdit#consoleBox, QPlainTextEdit#serialBox, QPlainTextEdit#cliBox { background: #050607; color: #00ff7f; border: 1px solid #111; border-radius: 10px; font-family: Consolas, Courier New, monospace; font-size: 12px; }
+                QLineEdit, QComboBox, QListWidget, QTableWidget, QTextEdit, QPlainTextEdit { border: 1px solid #334355; border-radius: 8px; padding: 6px; background: #0f151c; color: #e5edf5; }
+                """
+            )
+            return
         self.setStyleSheet(
             """
             QMainWindow, QDialog {
@@ -977,6 +1003,7 @@ class VCliQtApp(QtWidgets.QMainWindow):
         root = QtWidgets.QWidget()
         self.setCentralWidget(root)
         main = QtWidgets.QVBoxLayout(root)
+        self._build_menu_bar()
 
         split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
         main.addWidget(split, 1)
@@ -1025,8 +1052,8 @@ class VCliQtApp(QtWidgets.QMainWindow):
         right_layout.addWidget(console_group, 0)
 
         split.addWidget(right)
-        split.setStretchFactor(0, 1)
-        split.setStretchFactor(1, 4)
+        split.setStretchFactor(0, 3)
+        split.setStretchFactor(1, 10)
 
         self.new_btn.clicked.connect(self.create_project)
         self.open_btn.clicked.connect(self.open_project)
@@ -1034,6 +1061,59 @@ class VCliQtApp(QtWidgets.QMainWindow):
         self.recent_list.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
         self.recent_list.customContextMenuRequested.connect(self.open_recent_context_menu)
         self.tabs.currentChanged.connect(lambda *_: self._refresh_board_updates_indicator())
+        self._update_project_actions_enabled(False)
+        self.apply_app_settings_to_ui()
+
+    def _build_menu_bar(self):
+        menu_bar = self.menuBar()
+        file_menu = menu_bar.addMenu("Arquivo")
+        self.action_new = QtWidgets.QAction("Novo", self)
+        self.action_open = QtWidgets.QAction("Abrir", self)
+        self.action_open_folder = QtWidgets.QAction("Abrir pasta", self)
+        self.action_vscode = QtWidgets.QAction("VS Code", self)
+        self.action_compile = QtWidgets.QAction("Compilar", self)
+        self.action_upload = QtWidgets.QAction("Upload", self)
+        self.action_export = QtWidgets.QAction("Exportar binário", self)
+        self.action_properties = QtWidgets.QAction("Propriedades", self)
+        file_menu.addAction(self.action_new)
+        file_menu.addAction(self.action_open)
+        file_menu.addSeparator()
+        file_menu.addAction(self.action_open_folder)
+        file_menu.addAction(self.action_vscode)
+        file_menu.addAction(self.action_compile)
+        file_menu.addAction(self.action_upload)
+        file_menu.addAction(self.action_export)
+        file_menu.addAction(self.action_properties)
+
+        vcli_menu = menu_bar.addMenu("V CLI")
+        settings_action = QtWidgets.QAction("Configurações", self)
+        about_action = QtWidgets.QAction("About", self)
+        link_arduino = QtWidgets.QAction("Arduino CLI", self)
+        link_python = QtWidgets.QAction("Python", self)
+        link_pyqt = QtWidgets.QAction("PyQt5", self)
+        link_vscode = QtWidgets.QAction("VS Code", self)
+        vcli_menu.addAction(settings_action)
+        vcli_menu.addAction(about_action)
+        vcli_menu.addSeparator()
+        vcli_menu.addAction(link_arduino)
+        vcli_menu.addAction(link_python)
+        vcli_menu.addAction(link_pyqt)
+        vcli_menu.addAction(link_vscode)
+
+        self.action_new.triggered.connect(self.create_project)
+        self.action_open.triggered.connect(self.open_project)
+        self.action_open_folder.triggered.connect(self.open_project_folder)
+        self.action_vscode.triggered.connect(self.open_vscode)
+        self.action_compile.triggered.connect(self.compile_project)
+        self.action_upload.triggered.connect(self.upload_project)
+        self.action_export.triggered.connect(self.export_binary)
+        self.action_properties.triggered.connect(self.edit_project_properties)
+        settings_action.triggered.connect(self.open_settings_dialog)
+        about_action.triggered.connect(self.show_about_dialog)
+        link_arduino.triggered.connect(lambda: webbrowser.open("https://arduino.github.io/arduino-cli/latest/"))
+        link_python.triggered.connect(lambda: webbrowser.open("https://www.python.org/"))
+        link_pyqt.triggered.connect(lambda: webbrowser.open("https://pypi.org/project/PyQt5/"))
+        link_vscode.triggered.connect(lambda: webbrowser.open("https://code.visualstudio.com/"))
 
     def _build_code_tab(self):
         tab = QtWidgets.QWidget()
@@ -1259,10 +1339,161 @@ class VCliQtApp(QtWidgets.QMainWindow):
                 with open(self.app_settings_file, "r", encoding="utf-8") as handle:
                     data = json.load(handle)
                     if isinstance(data, dict):
-                        return data
+                        return self._ensure_app_setting_defaults(data)
         except Exception:
             pass
-        return {}
+        return self._ensure_app_setting_defaults({})
+
+    def _ensure_app_setting_defaults(self, settings: dict) -> dict:
+        cfg = dict(settings or {})
+        cfg.setdefault("editor_title", "VS Code")
+        cfg.setdefault("editor_command", "code")
+        cfg.setdefault("editor_button_color", "#0078d4")
+        cfg.setdefault("theme", "light")
+        cfg.setdefault("language", "auto")
+        cfg.setdefault("aux_library_repo", "")
+        cfg.setdefault("command_open_template", "vcli.cmd open \"{project}\"")
+        cfg.setdefault("command_vscode_template", "vcli.cmd vscode \"{project}\"")
+        cfg.setdefault("command_compile_template", "vcli.cmd compile \"{project}\"")
+        cfg.setdefault("command_export_template", "vcli.cmd export \"{project}\"")
+        cfg.setdefault("command_upload_template", "vcli.cmd upload \"{project}\" --port {port}")
+        return cfg
+
+    def _save_app_settings(self):
+        self.app_settings = self._ensure_app_setting_defaults(self.app_settings)
+        try:
+            with open(self.app_settings_file, "w", encoding="utf-8") as handle:
+                json.dump(self.app_settings, handle, ensure_ascii=False, indent=2)
+        except Exception as exc:
+            self.log(f"[WARN] Falha ao salvar settings: {exc}")
+
+    def apply_app_settings_to_ui(self):
+        settings = self._ensure_app_setting_defaults(self.app_settings)
+        editor_title = str(settings.get("editor_title", "VS Code") or "VS Code").strip()
+        editor_color = str(settings.get("editor_button_color", "#0078d4") or "#0078d4").strip()
+        self.btn_vscode.setText(editor_title)
+        self.btn_vscode.setStyleSheet(
+            f"background: {editor_color}; color: white; border: 1px solid {editor_color}; border-radius: 8px; padding: 7px 12px; font-weight: 600;"
+        )
+        if hasattr(self, "action_vscode"):
+            self.action_vscode.setText(editor_title)
+
+    def _editor_command(self) -> str:
+        return str(self.app_settings.get("editor_command", "code") or "code").strip()
+
+    def _command_templates(self) -> dict:
+        return {
+            "open": str(self.app_settings.get("command_open_template", 'vcli.cmd open "{project}"')),
+            "vscode": str(self.app_settings.get("command_vscode_template", 'vcli.cmd vscode "{project}"')),
+            "compile": str(self.app_settings.get("command_compile_template", 'vcli.cmd compile "{project}"')),
+            "export": str(self.app_settings.get("command_export_template", 'vcli.cmd export "{project}"')),
+            "upload": str(self.app_settings.get("command_upload_template", 'vcli.cmd upload "{project}" --port {port}')),
+        }
+
+    def _is_vcli_registered_on_path(self) -> bool:
+        path_env = os.getenv("PATH", "")
+        base_dir = str(Path.cwd()).lower()
+        for entry in path_env.split(os.pathsep):
+            if entry.strip().lower() == base_dir:
+                return True
+        return False
+
+    def _list_project_source_files(self) -> list:
+        if not self.current_project or not self.current_project.exists():
+            return []
+        allowed = {".ino", ".h", ".hpp", ".c", ".cpp", ".txt"}
+        files = []
+        for path in self.current_project.rglob("*"):
+            if path.is_file() and path.suffix.lower() in allowed:
+                try:
+                    rel = path.relative_to(self.current_project)
+                except Exception:
+                    rel = path.name
+                files.append(str(rel).replace("\\", "/"))
+        return sorted(files)
+
+    def _extract_version_variables(self, relative_file: str) -> list:
+        if not self.current_project or not relative_file:
+            return []
+        target = self.current_project / relative_file
+        if not target.exists():
+            return []
+        content = target.read_text(encoding="utf-8", errors="replace")
+        found = []
+        patterns = [
+            (r'#define\s+([A-Za-z_][A-Za-z0-9_]*)\s+"([^"]*)"', "string"),
+            (r'#define\s+([A-Za-z_][A-Za-z0-9_]*)\s+([0-9]+)', "number"),
+            (r'\b(?:static\s+)?(?:const\s+)?char\s+([A-Za-z_][A-Za-z0-9_]*)\s*\[\s*\d*\s*\]\s*=\s*"([^"]*)"', "string"),
+            (r'\b(?:const\s+)?char\s+([A-Za-z_][A-Za-z0-9_]*)\s*\[\s*\]\s*=\s*"([^"]*)"', "string"),
+            (r'\b(?:const\s+char\s*\*|char\s*\*|String|std::string)\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*"([^"]*)"', "string"),
+            (r'\b(?:constexpr\s+auto|const\s+auto|auto)\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*"([^"]*)"', "string"),
+            (r'\bString\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*"([^"]*)"\s*\)', "string"),
+            (r'\b(?:int|long|unsigned\s+int|unsigned\s+long)\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([0-9]+)', "number"),
+            (r'\b(?:uint8_t|uint16_t|uint32_t|size_t)\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([0-9]+)', "number"),
+            (r'\b([A-Za-z_][A-Za-z0-9_]*)\s*=\s*"([^"]*?(?:\d+\.\d+\.\d+|\d+)[^"]*)"', "string"),
+            (r"\b([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([0-9]+)", "number"),
+        ]
+        for pattern, kind in patterns:
+            for match in re.finditer(pattern, content):
+                name = match.group(1)
+                value = match.group(2)
+                found.append({
+                    "name": name,
+                    "kind": kind,
+                    "preview": f"{name} = {value}",
+                })
+        unique = []
+        seen = set()
+        for item in found:
+            key = (item["name"], item["kind"])
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(item)
+        scored = []
+        for item in unique:
+            score = 0
+            name_upper = item["name"].upper()
+            if "VER" in name_upper:
+                score += 4
+            if "VERSION" in name_upper:
+                score += 6
+            if "FW" in name_upper or "ECU" in name_upper:
+                score += 2
+            if re.search(r"\d+\.\d+\.\d+|\d+", item["preview"]):
+                score += 3
+            scored.append((score, item))
+        scored.sort(key=lambda pair: (-pair[0], pair[1]["name"].lower()))
+        return [item for _, item in scored]
+
+    def _update_project_actions_enabled(self, enabled: bool):
+        for widget in [self.btn_folder, self.btn_vscode, self.btn_compile, self.btn_upload, self.btn_export]:
+            widget.setEnabled(enabled)
+        for action in [
+            getattr(self, "action_open_folder", None),
+            getattr(self, "action_vscode", None),
+            getattr(self, "action_compile", None),
+            getattr(self, "action_upload", None),
+            getattr(self, "action_export", None),
+            getattr(self, "action_properties", None),
+        ]:
+            if action:
+                action.setEnabled(enabled)
+
+    def _ensure_project_property_defaults(self):
+        if not self.current_config:
+            return {}
+        props = self.current_config.setdefault("properties", {})
+        props.setdefault("author", "")
+        props.setdefault("version", "1.0.0")
+        props.setdefault("contributors", "")
+        props.setdefault("description", "")
+        props.setdefault("icon", "")
+        props.setdefault("autoversion_mode", "disabled")
+        props.setdefault("autoversion_file", "")
+        props.setdefault("autoversion_variable", "VERSION")
+        props.setdefault("autoversion_kind", "string")
+        return props
 
     def _project_icon_path_from_config(self, project_path: Path, config: dict | None = None) -> Path:
         cfg = config or {}
@@ -1491,12 +1722,14 @@ class VCliQtApp(QtWidgets.QMainWindow):
         self.current_project = Path(path)
         config.setdefault("name", self.current_project.name)
         self.current_config = config
+        self._ensure_project_property_defaults()
         self.add_to_recent(path)
         self.update_project_info()
 
     def update_project_info(self):
         if not self.current_project or not self.current_config:
             return
+        self._ensure_project_property_defaults()
         self.project_name_label.setText(self.current_config.get("name", self.current_project.name))
         saved_fqbn = self.current_config.get("fqbn", "")
         saved_port = self.current_config.get("port", "auto") or "auto"
@@ -1508,6 +1741,7 @@ class VCliQtApp(QtWidgets.QMainWindow):
         self._set_combo_value(self.baud_combo, saved_baud)
         self.refresh_serial_status(bool(self.serial_connection))
         self._update_history_icon()
+        self._update_project_actions_enabled(True)
         if saved_fqbn:
             self.load_board_details_async(saved_fqbn)
         else:
@@ -1667,15 +1901,34 @@ class VCliQtApp(QtWidgets.QMainWindow):
     def edit_project_properties(self):
         if not self.current_project or not self.current_config:
             return
-        props = self.current_config.setdefault("properties", {})
+        props = self._ensure_project_property_defaults()
         dialog = QtWidgets.QDialog(self)
         dialog.setWindowTitle(self.t("props.title", "Project Properties"))
-        self.fit_dialog_to_screen(dialog, 620, 560)
-        layout = QtWidgets.QFormLayout(dialog)
+        self.fit_dialog_to_screen(dialog, 900, 660)
+        outer = QtWidgets.QVBoxLayout(dialog)
+        body = QtWidgets.QHBoxLayout()
+        nav = QtWidgets.QListWidget()
+        nav.setFixedWidth(220)
+        nav.addItems(["Geral", "Autoversionamento"])
+        stack = QtWidgets.QStackedWidget()
+        body.addWidget(nav)
+        body.addWidget(stack, 1)
+
+        general_page = QtWidgets.QWidget()
+        general_form = QtWidgets.QFormLayout(general_page)
         author = QtWidgets.QLineEdit(props.get("author", ""))
         version = QtWidgets.QLineEdit(props.get("version", "1.0.0"))
         contributors = QtWidgets.QLineEdit(props.get("contributors", ""))
         description = QtWidgets.QTextEdit(props.get("description", ""))
+        autoversion_options = [
+            ("Desativado", "disabled"),
+            ("Sempre ao exportar binário", "always_export"),
+            ("Sempre no upload", "always_upload"),
+            ("Sempre em ambos", "always_both"),
+            ("Perguntar ao exportar binário", "ask_export"),
+            ("Perguntar no upload", "ask_upload"),
+            ("Perguntar em ambos", "ask_both"),
+        ]
         icon_preview = QtWidgets.QLabel()
         icon_preview.setFixedSize(48, 48)
         icon_preview.setPixmap(self._pixmap_for_icon_path(self._project_icon_path_from_config(self.current_project, self.current_config), size=44))
@@ -1687,13 +1940,120 @@ class VCliQtApp(QtWidgets.QMainWindow):
         icon_row.addWidget(choose_icon_btn)
         icon_row.addWidget(reset_icon_btn)
         icon_row.addStretch(1)
-        layout.addRow(self.t("props.author", "Author:"), author)
-        layout.addRow(self.t("props.version", "Version:"), version)
-        layout.addRow(self.t("props.contributors", "Contributors:"), contributors)
-        layout.addRow(self.t("props.description", "Description:"), description)
-        layout.addRow("Ícone:", self._wrap_layout(icon_row))
+        general_form.addRow(self.t("props.author", "Author:"), author)
+        general_form.addRow(self.t("props.version", "Version:"), version)
+        general_form.addRow(self.t("props.contributors", "Contributors:"), contributors)
+        general_form.addRow(self.t("props.description", "Description:"), description)
+        general_form.addRow("Ícone:", self._wrap_layout(icon_row))
+        stack.addWidget(general_page)
+
+        auto_page = QtWidgets.QWidget()
+        auto_layout = QtWidgets.QVBoxLayout(auto_page)
+        auto_form = QtWidgets.QFormLayout()
+        autoversion_mode = QtWidgets.QComboBox()
+        for label, value in autoversion_options:
+            autoversion_mode.addItem(label, value)
+        current_mode_index = autoversion_mode.findData(props.get("autoversion_mode", "disabled"))
+        autoversion_mode.setCurrentIndex(current_mode_index if current_mode_index >= 0 else 0)
+        selected_file_label = QtWidgets.QLabel(props.get("autoversion_file", "") or "-")
+        selected_file_label.setWordWrap(True)
+        selected_var_label = QtWidgets.QLabel(props.get("autoversion_variable", "VERSION") or "VERSION")
+        selected_var_label.setWordWrap(True)
+        selected_kind_label = QtWidgets.QLabel(props.get("autoversion_kind", "string"))
+        selected_kind_label.setWordWrap(True)
+        auto_form.addRow(self.t("props.autoversion_mode", "Mode:"), autoversion_mode)
+        auto_form.addRow(self.t("props.autoversion_file", "Selected file:"), selected_file_label)
+        auto_form.addRow(self.t("props.autoversion_var", "Selected variable:"), selected_var_label)
+        auto_form.addRow(self.t("props.autoversion_kind", "Detected type:"), selected_kind_label)
+        auto_layout.addLayout(auto_form)
+
+        files_help = QtWidgets.QLabel(self.t("props.autoversion_files", "Detected project files:"))
+        vars_help = QtWidgets.QLabel(self.t("props.autoversion_vars", "Detected file variables:"))
+        file_search = QtWidgets.QLineEdit()
+        file_search.setPlaceholderText(self.t("props.autoversion_files_filter", "Filter files..."))
+        var_search = QtWidgets.QLineEdit()
+        var_search.setPlaceholderText(self.t("props.autoversion_vars_filter", "Filter variables..."))
+        files_list = QtWidgets.QListWidget()
+        vars_list = QtWidgets.QListWidget()
+        files_and_vars = QtWidgets.QHBoxLayout()
+        left_col = QtWidgets.QVBoxLayout()
+        right_col = QtWidgets.QVBoxLayout()
+        left_col.addWidget(files_help)
+        left_col.addWidget(file_search)
+        left_col.addWidget(files_list, 1)
+        right_col.addWidget(vars_help)
+        right_col.addWidget(var_search)
+        right_col.addWidget(vars_list, 1)
+        files_and_vars.addLayout(left_col, 1)
+        files_and_vars.addLayout(right_col, 1)
+        auto_layout.addLayout(files_and_vars, 1)
+        stack.addWidget(auto_page)
+
+        available_files = self._list_project_source_files()
+        filtered_files = {"items": list(available_files)}
+        current_variables = {"items": []}
+        files_list.addItems(filtered_files["items"])
+        selected_autoversion_file = {"value": props.get("autoversion_file", "")}
+        selected_autoversion_variable = {"value": props.get("autoversion_variable", "VERSION")}
+        for index in range(files_list.count()):
+            if files_list.item(index).text() == selected_autoversion_file["value"]:
+                files_list.setCurrentRow(index)
+                break
+
+        def refresh_file_list():
+            term = file_search.text().strip().lower()
+            filtered_files["items"] = [item for item in available_files if not term or term in item.lower()]
+            files_list.clear()
+            files_list.addItems(filtered_files["items"])
+            for index in range(files_list.count()):
+                if files_list.item(index).text() == selected_autoversion_file["value"]:
+                    files_list.setCurrentRow(index)
+                    break
+
+        def refresh_var_list():
+            term = var_search.text().strip().lower()
+            vars_list.clear()
+            for item in current_variables["items"]:
+                text = f"{item['name']} [{item['kind']}]  {item['preview']}"
+                if term and term not in text.lower():
+                    continue
+                list_item = QtWidgets.QListWidgetItem(text)
+                list_item.setData(QtCore.Qt.UserRole, item)
+                vars_list.addItem(list_item)
+            for index in range(vars_list.count()):
+                item_data = vars_list.item(index).data(QtCore.Qt.UserRole)
+                if item_data and item_data.get("name") == selected_autoversion_variable["value"]:
+                    vars_list.setCurrentRow(index)
+                    break
+
+        def refresh_variables_for_selected_file():
+            current_file_item = files_list.currentItem()
+            current_file = current_file_item.text() if current_file_item else ""
+            selected_autoversion_file["value"] = current_file
+            selected_file_label.setText(current_file or "-")
+            current_variables["items"] = self._extract_version_variables(current_file)
+            refresh_var_list()
+
+        def choose_variable():
+            current_item = vars_list.currentItem()
+            if not current_item:
+                return
+            data = current_item.data(QtCore.Qt.UserRole) or {}
+            selected_autoversion_variable["value"] = data.get("name", "VERSION")
+            selected_var_label.setText(selected_autoversion_variable["value"])
+            selected_kind_label.setText(data.get("kind", "string"))
+
+        files_list.currentItemChanged.connect(lambda *_: refresh_variables_for_selected_file())
+        vars_list.currentItemChanged.connect(lambda *_: choose_variable())
+        file_search.textChanged.connect(lambda *_: refresh_file_list())
+        var_search.textChanged.connect(lambda *_: refresh_var_list())
+        if files_list.count() and files_list.currentRow() < 0:
+            files_list.setCurrentRow(0)
+        refresh_variables_for_selected_file()
+
         buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
-        layout.addRow(buttons)
+        outer.addLayout(body)
+        outer.addWidget(buttons)
 
         def choose_icon():
             path, _ = QtWidgets.QFileDialog.getOpenFileName(dialog, "Escolher ícone do projeto", "", "Imagens (*.png *.jpg *.jpeg *.bmp *.ico)")
@@ -1708,12 +2068,18 @@ class VCliQtApp(QtWidgets.QMainWindow):
 
         choose_icon_btn.clicked.connect(choose_icon)
         reset_icon_btn.clicked.connect(reset_icon)
+        nav.currentRowChanged.connect(stack.setCurrentIndex)
+        nav.setCurrentRow(0)
 
         def save_props():
             props["author"] = author.text().strip()
             props["version"] = version.text().strip()
             props["contributors"] = contributors.text().strip()
             props["description"] = description.toPlainText().strip()
+            props["autoversion_mode"] = autoversion_mode.currentData() or "disabled"
+            props["autoversion_file"] = selected_autoversion_file["value"]
+            props["autoversion_variable"] = selected_autoversion_variable["value"] or "VERSION"
+            props["autoversion_kind"] = selected_kind_label.text().strip() or "string"
             icon_choice = selected_icon_path["value"]
             if icon_choice == "__DEFAULT__":
                 props["icon"] = ""
@@ -1736,7 +2102,271 @@ class VCliQtApp(QtWidgets.QMainWindow):
     def open_vscode(self):
         if not self.current_project:
             return
-        self.backend.open_code_editor(str(self.current_project))
+        self.backend.open_code_editor(str(self.current_project), editor=self._editor_command())
+
+    def open_settings_dialog(self):
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle("Configurações")
+        self.fit_dialog_to_screen(dialog, 980, 680)
+        outer = QtWidgets.QVBoxLayout(dialog)
+        body = QtWidgets.QHBoxLayout()
+        nav = QtWidgets.QListWidget()
+        nav.setFixedWidth(220)
+        nav.addItems(["Geral", "Editor", "Bibliotecas", "Placas / JSON", "Comandos"])
+        stack = QtWidgets.QStackedWidget()
+        body.addWidget(nav)
+        body.addWidget(stack, 1)
+
+        settings = self._ensure_app_setting_defaults(self.app_settings)
+
+        general_page = QtWidgets.QWidget()
+        general_form = QtWidgets.QFormLayout(general_page)
+        theme_combo = QtWidgets.QComboBox()
+        theme_combo.addItem("Claro", "light")
+        theme_combo.addItem("Escuro", "dark")
+        theme_index = theme_combo.findData(settings.get("theme", "light"))
+        theme_combo.setCurrentIndex(theme_index if theme_index >= 0 else 0)
+        language_combo = QtWidgets.QComboBox()
+        language_combo.addItem("Automático", "auto")
+        language_combo.addItem("Português", "pt")
+        language_combo.addItem("English", "en")
+        lang_index = language_combo.findData(settings.get("language", "auto"))
+        language_combo.setCurrentIndex(lang_index if lang_index >= 0 else 0)
+        language_note = QtWidgets.QLabel("Idioma e tema são aplicados após salvar. O idioma pode exigir reiniciar a aplicação para refletir tudo.")
+        language_note.setWordWrap(True)
+        general_form.addRow("Tema:", theme_combo)
+        general_form.addRow("Idioma:", language_combo)
+        general_form.addRow(language_note)
+        stack.addWidget(general_page)
+
+        editor_page = QtWidgets.QWidget()
+        editor_form = QtWidgets.QFormLayout(editor_page)
+        editor_title = QtWidgets.QLineEdit(settings.get("editor_title", "VS Code"))
+        editor_command = QtWidgets.QLineEdit(settings.get("editor_command", "code"))
+        editor_color = QtWidgets.QLineEdit(settings.get("editor_button_color", "#0078d4"))
+        choose_color_btn = QtWidgets.QPushButton("Cor...")
+        color_row = QtWidgets.QHBoxLayout()
+        color_row.addWidget(editor_color, 1)
+        color_row.addWidget(choose_color_btn)
+        editor_form.addRow("Título do editor:", editor_title)
+        editor_form.addRow("Comando do editor:", editor_command)
+        editor_form.addRow("Cor do botão:", self._wrap_layout(color_row))
+        editor_form.addRow(QtWidgets.QLabel("Exemplos de comando: `code`, `cursor`, caminho completo do editor."))
+        stack.addWidget(editor_page)
+
+        libs_page = QtWidgets.QWidget()
+        libs_form = QtWidgets.QFormLayout(libs_page)
+        aux_repo = QtWidgets.QLineEdit(settings.get("aux_library_repo", ""))
+        aux_info = QtWidgets.QLabel("Repositório auxiliar de bibliotecas (experimental). Use URL direta quando necessário.")
+        aux_info.setWordWrap(True)
+        default_lib_info = QtWidgets.QLabel("Padrão atual: índice padrão do Arduino CLI em Arduino15/library_index.json.")
+        default_lib_info.setWordWrap(True)
+        libs_form.addRow("Servidor / URL auxiliar:", aux_repo)
+        libs_form.addRow(aux_info)
+        libs_form.addRow(default_lib_info)
+        stack.addWidget(libs_page)
+
+        boards_page = QtWidgets.QWidget()
+        boards_layout = QtWidgets.QVBoxLayout(boards_page)
+        boards_layout.addWidget(QtWidgets.QLabel("JSONs auxiliares de placas"))
+        board_urls_list = QtWidgets.QListWidget()
+        for url in self.backend.get_additional_board_urls():
+            board_urls_list.addItem(url)
+        boards_layout.addWidget(board_urls_list, 1)
+        board_url_entry = QtWidgets.QLineEdit()
+        board_url_entry.setPlaceholderText("URL do índice de placas")
+        boards_btns = QtWidgets.QHBoxLayout()
+        board_add_btn = QtWidgets.QPushButton("Adicionar")
+        board_remove_btn = QtWidgets.QPushButton("Remover selecionado")
+        boards_btns.addWidget(board_add_btn)
+        boards_btns.addWidget(board_remove_btn)
+        boards_layout.addWidget(board_url_entry)
+        boards_layout.addLayout(boards_btns)
+        stack.addWidget(boards_page)
+
+        commands_page = QtWidgets.QWidget()
+        commands_layout = QtWidgets.QFormLayout(commands_page)
+        command_status = QtWidgets.QLabel(
+            "Registrado no PATH do Windows." if self._is_vcli_registered_on_path() else "Ainda não registrado no PATH do Windows."
+        )
+        command_status.setWordWrap(True)
+        cmd_open = QtWidgets.QLineEdit(settings.get("command_open_template", 'vcli.cmd open "{project}"'))
+        cmd_vscode = QtWidgets.QLineEdit(settings.get("command_vscode_template", 'vcli.cmd vscode "{project}"'))
+        cmd_compile = QtWidgets.QLineEdit(settings.get("command_compile_template", 'vcli.cmd compile "{project}"'))
+        cmd_export = QtWidgets.QLineEdit(settings.get("command_export_template", 'vcli.cmd export "{project}"'))
+        cmd_upload = QtWidgets.QLineEdit(settings.get("command_upload_template", 'vcli.cmd upload "{project}" --port {port}'))
+        commands_help = QtWidgets.QLabel(
+            "Marcadores: {project} e {port}. Você pode personalizar os comandos exibidos/copiados para o terminal."
+        )
+        commands_help.setWordWrap(True)
+        commands_layout.addRow("Status:", command_status)
+        commands_layout.addRow("Abrir projeto:", cmd_open)
+        commands_layout.addRow("Abrir editor:", cmd_vscode)
+        commands_layout.addRow("Compilar:", cmd_compile)
+        commands_layout.addRow("Exportar:", cmd_export)
+        commands_layout.addRow("Upload:", cmd_upload)
+        commands_layout.addRow(commands_help)
+        stack.addWidget(commands_page)
+
+        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        outer.addLayout(body)
+        outer.addWidget(buttons)
+
+        def choose_color():
+            color = QtWidgets.QColorDialog.getColor(QtGui.QColor(editor_color.text() or "#0078d4"), dialog)
+            if color.isValid():
+                editor_color.setText(color.name())
+
+        def add_board_url():
+            url = board_url_entry.text().strip()
+            if not url:
+                return
+            out, ok_result, err = self.backend.add_board_json_sync(url)
+            if ok_result:
+                board_urls_list.addItem(url)
+                board_url_entry.clear()
+            else:
+                self.show_error_dialog("JSONs de placas", err or "Falha ao adicionar URL", out)
+
+        def remove_board_url():
+            current = board_urls_list.currentItem()
+            if not current:
+                return
+            url = current.text()
+            out, ok_result, err = self.backend.remove_board_json_sync(url)
+            if ok_result:
+                board_urls_list.takeItem(board_urls_list.row(current))
+            else:
+                self.show_error_dialog("JSONs de placas", err or "Falha ao remover URL", out)
+
+        def save_settings():
+            self.app_settings["theme"] = theme_combo.currentData() or "light"
+            self.app_settings["language"] = language_combo.currentData() or "auto"
+            self.app_settings["editor_title"] = editor_title.text().strip() or "VS Code"
+            self.app_settings["editor_command"] = editor_command.text().strip() or "code"
+            self.app_settings["editor_button_color"] = editor_color.text().strip() or "#0078d4"
+            self.app_settings["aux_library_repo"] = aux_repo.text().strip()
+            self.app_settings["command_open_template"] = cmd_open.text().strip() or 'vcli.cmd open "{project}"'
+            self.app_settings["command_vscode_template"] = cmd_vscode.text().strip() or 'vcli.cmd vscode "{project}"'
+            self.app_settings["command_compile_template"] = cmd_compile.text().strip() or 'vcli.cmd compile "{project}"'
+            self.app_settings["command_export_template"] = cmd_export.text().strip() or 'vcli.cmd export "{project}"'
+            self.app_settings["command_upload_template"] = cmd_upload.text().strip() or 'vcli.cmd upload "{project}" --port {port}'
+            self._save_app_settings()
+            self.lang = self._detect_system_lang()
+            self._load_i18n()
+            self._apply_styles()
+            self.apply_app_settings_to_ui()
+            dialog.accept()
+
+        choose_color_btn.clicked.connect(choose_color)
+        board_add_btn.clicked.connect(add_board_url)
+        board_remove_btn.clicked.connect(remove_board_url)
+        nav.currentRowChanged.connect(stack.setCurrentIndex)
+        nav.setCurrentRow(0)
+        buttons.accepted.connect(save_settings)
+        buttons.rejected.connect(dialog.reject)
+        dialog.exec_()
+
+    def _increment_version(self, version_text: str) -> str:
+        parts = [segment for segment in str(version_text or "1.0.0").split(".")]
+        normalized = []
+        for segment in parts[:3]:
+            digits = "".join(ch for ch in segment if ch.isdigit())
+            normalized.append(int(digits) if digits else 0)
+        while len(normalized) < 3:
+            normalized.append(0)
+        normalized[2] += 1
+        return ".".join(str(value) for value in normalized[:3])
+
+    def _update_version_in_source_file(self, target_file: Path, variable_name: str, new_version: str, value_kind: str = "string") -> bool:
+        if not target_file.exists():
+            raise FileNotFoundError(f"Arquivo de versão não encontrado: {target_file}")
+        content = target_file.read_text(encoding="utf-8", errors="replace")
+        escaped_var = re.escape(variable_name.strip() or "VERSION")
+        if value_kind == "number":
+            if not str(new_version).isdigit():
+                raise ValueError("Versão configurada como número, mas o valor atual não é numérico.")
+            patterns = [
+                rf'(#define\s+{escaped_var}\s+)([0-9]+)',
+                rf'(\b{escaped_var}\b\s*=\s*)([0-9]+)',
+            ]
+            replacement = rf"\g<1>{new_version}"
+        else:
+            patterns = [
+                rf'((?:const\s+)?char\s+{escaped_var}\s*\[\s*\]\s*=\s*")([^"]*)(")',
+                rf'(#define\s+{escaped_var}\s+")([^"]*)(")',
+                rf'(\b{escaped_var}\b\s*=\s*")([^"]*)(")',
+                rf"(\b{escaped_var}\b\s*=\s*')([^']*)(')",
+            ]
+            replacement = rf"\g<1>{new_version}\g<3>"
+        replaced = False
+        updated_content = content
+        for pattern in patterns:
+            updated_content, count = re.subn(pattern, replacement, updated_content, count=1)
+            if count:
+                replaced = True
+                break
+        if not replaced:
+            return False
+        target_file.write_text(updated_content, encoding="utf-8")
+        return True
+
+    def _should_run_autoversion(self, action_name: str):
+        if not self.current_project or not self.current_config:
+            return False
+        props = self._ensure_project_property_defaults()
+        mode = str(props.get("autoversion_mode", "disabled") or "disabled")
+        if mode == "disabled":
+            return False
+        always_matches = {
+            "always_export": {"export"},
+            "always_upload": {"upload"},
+            "always_both": {"export", "upload"},
+            "ask_export": {"export"},
+            "ask_upload": {"upload"},
+            "ask_both": {"export", "upload"},
+        }
+        allowed = always_matches.get(mode, set())
+        if action_name not in allowed:
+            return False
+        if mode.startswith("ask_"):
+            label = "exportar binário" if action_name == "export" else "fazer upload"
+            answer = QtWidgets.QMessageBox.question(
+                self,
+                "Autoversionamento",
+                f"Deseja incrementar a versão antes de {label}?\n\nUse 'Não' quando for apenas um teste.",
+            )
+            return answer == QtWidgets.QMessageBox.Yes
+        return True
+
+    def _run_autoversion(self, action_name: str) -> tuple:
+        if not self._should_run_autoversion(action_name):
+            return True, ""
+        props = self._ensure_project_property_defaults()
+        old_version = str(props.get("version", "1.0.0") or "1.0.0").strip()
+        new_version = self._increment_version(old_version)
+        value_kind = str(props.get("autoversion_kind", "string") or "string").strip()
+        if value_kind == "number":
+            digits = "".join(ch for ch in old_version if ch.isdigit())
+            current_number = int(digits or "0") + 1
+            new_version = str(current_number)
+        props["version"] = new_version
+        version_file = str(props.get("autoversion_file", "") or "").strip()
+        version_variable = str(props.get("autoversion_variable", "VERSION") or "VERSION").strip()
+        if version_file:
+            target_file = (self.current_project / version_file).resolve()
+            try:
+                updated = self._update_version_in_source_file(target_file, version_variable, new_version, value_kind=value_kind)
+            except Exception as exc:
+                return False, f"Falha ao atualizar arquivo de versão: {exc}"
+            if not updated:
+                return False, (
+                    f"Não encontrei a variável '{version_variable}' em '{version_file}' "
+                    f"para atualizar para {new_version}."
+                )
+        self.save_config()
+        self.log(f"[VERSION] {old_version} -> {new_version}")
+        return True, new_version
 
     def open_project_folder(self):
         if not self.current_project:
@@ -1745,6 +2375,41 @@ class VCliQtApp(QtWidgets.QMainWindow):
             subprocess.Popen(["explorer", str(self.current_project)])
         except Exception as exc:
             self.show_error_dialog(self.t("error.title", "Error"), str(exc))
+
+    def show_about_dialog(self):
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle("About V CLI")
+        self.fit_dialog_to_screen(dialog, 640, 420)
+        layout = QtWidgets.QVBoxLayout(dialog)
+        title = QtWidgets.QLabel("V CLI")
+        title.setObjectName("managerTitle")
+        subtitle = QtWidgets.QLabel("Interface Qt 5 para arduino-cli")
+        subtitle.setStyleSheet("font-size: 13px; color: #4b5563;")
+        info = QtWidgets.QLabel(
+            "Tecnologias principais:\n"
+            "- Python\n"
+            "- PyQt5\n"
+            "- Arduino CLI\n"
+            "- VS Code\n"
+        )
+        info.setWordWrap(True)
+        links = QtWidgets.QLabel(
+            '<a href="https://arduino.github.io/arduino-cli/latest/">Arduino CLI</a><br>'
+            '<a href="https://www.python.org/">Python</a><br>'
+            '<a href="https://pypi.org/project/PyQt5/">PyQt5</a><br>'
+            '<a href="https://code.visualstudio.com/">VS Code</a>'
+        )
+        links.setOpenExternalLinks(True)
+        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok)
+        buttons.accepted.connect(dialog.accept)
+        layout.addWidget(title)
+        layout.addWidget(subtitle)
+        layout.addSpacing(8)
+        layout.addWidget(info)
+        layout.addWidget(links)
+        layout.addStretch(1)
+        layout.addWidget(buttons)
+        dialog.exec_()
 
     def compile_project(self):
         if not self.current_project or not self.current_config:
@@ -1781,6 +2446,10 @@ class VCliQtApp(QtWidgets.QMainWindow):
     def upload_project(self):
         if not self.current_project or not self.current_config:
             return
+        ok_version, version_info = self._run_autoversion("upload")
+        if not ok_version:
+            self.show_error_dialog("Autoversionamento", version_info)
+            return
         port = self.current_config.get("port", "auto")
         if not port or port == "auto":
             port = self.port_combo.currentText()
@@ -1793,6 +2462,7 @@ class VCliQtApp(QtWidgets.QMainWindow):
             f"Projeto: {self.current_project.name}",
             f"Placa (FQBN): {fqbn}",
             f"Porta: {port}",
+            f"Versão do projeto: {self.current_config.get('properties', {}).get('version', '1.0.0')}",
             f"Comando 1: arduino-cli compile --fqbn {fqbn} {self.current_project}",
             f"Comando 2: arduino-cli upload -p {port} --fqbn {fqbn} {self.current_project}",
         ]
@@ -1833,11 +2503,16 @@ class VCliQtApp(QtWidgets.QMainWindow):
     def export_binary(self):
         if not self.current_project or not self.current_config:
             return
+        ok_version, version_info = self._run_autoversion("export")
+        if not ok_version:
+            self.show_error_dialog("Autoversionamento", version_info)
+            return
         fqbn = self.current_config.get("fqbn", "arduino:avr:uno")
         debug_lines = [
             "[PRE-DEBUG]",
             f"Projeto: {self.current_project.name}",
             f"Placa (FQBN): {fqbn}",
+            f"Versão do projeto: {self.current_config.get('properties', {}).get('version', '1.0.0')}",
             f"Comando: arduino-cli compile --fqbn {fqbn} --export-binaries {self.current_project}",
         ]
         dialog = ActionProgressDialog(self, "Exportar Binário", "Gerando binários da compilação...", debug_lines, abort_callback=lambda: self._request_abort_action(dialog))
